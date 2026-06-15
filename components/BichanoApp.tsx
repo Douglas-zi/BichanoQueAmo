@@ -2399,6 +2399,8 @@ export function BichanoApp() {
     ],
   };
 
+  const visibleNavItems = navItems[role].filter((item) => item.page !== "history" || page === "calendar");
+
   if (sessionChecking) {
     return (
       <main className={styles.phoneShell}>
@@ -2849,8 +2851,8 @@ export function BichanoApp() {
         )}
       </div>
 
-      <nav className={styles.bottomNav} style={{ gridTemplateColumns: `repeat(${navItems[role].length}, 1fr)` }}>
-        {navItems[role].map((item) => (
+      <nav className={styles.bottomNav} style={{ gridTemplateColumns: `repeat(${visibleNavItems.length}, 1fr)` }}>
+        {visibleNavItems.map((item) => (
           <button className={page === item.page ? styles.navActive : ""} key={item.page} onClick={() => setPage(item.page)}>
             <span>{item.icon}</span>{item.label}
           </button>
