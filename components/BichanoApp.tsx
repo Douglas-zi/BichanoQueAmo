@@ -2798,6 +2798,11 @@ export function BichanoApp() {
 
         {page === "history" && (
           <Page title="Histórico de visitas" intro="Visitas concluídas e canceladas ficam aqui, fora do painel atual.">
+            {visibleVisitHistory.length > 0 && (
+              <button className={styles.clearHistoryButton} onClick={clearVisitHistory} type="button">
+                Limpar historico
+              </button>
+            )}
             <div className={styles.list}>{visibleVisitHistory.length ? visibleVisitHistory.map((item) => <AppointmentCard appointment={item} key={item.id} onClick={() => openAppointment(item)} />) : <EmptyState text="Nenhuma visita no histórico." />}</div>
           </Page>
         )}

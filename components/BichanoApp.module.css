@@ -159,6 +159,7 @@
 .petActions .deletePet { color: var(--red); background: #fff0f2; }
 .petActions button:disabled { opacity: .55; cursor: wait; }
 .dashedButton { width: 100%; min-height: 62px; margin-top: 12px; border: 1.5px dashed #dfcec0; border-radius: 20px; color: var(--red); background: transparent; font-weight: 800; }
+.clearHistoryButton { width: 100%; min-height: 48px; margin-top: 12px; border-radius: 16px; color: var(--red); background: #fff0f2; font-size: 11px; font-weight: 850; }
 .emptyState { padding: 18px; border: 1px dashed #dfcec0; border-radius: 18px; color: var(--muted); background: rgba(255,255,255,.58); text-align: center; font-size: 11px; line-height: 1.5; }
 .paymentCard { margin-top: 18px; border-color: #f0d9b7; background: #fff8e9; }
 .paymentIcon { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 15px; color: #9b5b0b; background: #ffe8b8; font-weight: 850; }
