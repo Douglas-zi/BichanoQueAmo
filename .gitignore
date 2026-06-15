@@ -1,0 +1,11 @@
+config.js
+.DS_Store
+node_modules/
+.next/
+.debug-chrome/
+.npm-cache/
+supabase/.temp/
+tsconfig.tsbuildinfo
+.env*
+!.env.local.example
+npm-debug.log*
