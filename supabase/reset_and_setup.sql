@@ -15,7 +15,7 @@ grant all on schema public to postgres, service_role;
 create extension if not exists pgcrypto with schema extensions;
 
 create type public.user_role as enum ('client', 'staff', 'admin');
-create type public.appointment_status as enum ('requested', 'confirmed', 'in_progress', 'completed', 'cancelled');
+create type public.appointment_status as enum ('requested', 'confirmed', 'waitlisted', 'in_progress', 'completed', 'cancelled');
 create type public.payment_status as enum ('pending', 'paid', 'overdue', 'cancelled', 'refunded');
 create type public.discount_type as enum ('fixed');
 create type public.waitlist_status as enum ('waiting', 'approved', 'rejected', 'cancelled');
@@ -120,6 +120,7 @@ create table public.appointments (
   visit_count integer not null default 1 check (visit_count > 0),
   extra_pet_count integer not null default 0 check (extra_pet_count >= 0),
   internal_notes text,
+  completed_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   check (ends_at > starts_at)
@@ -533,42 +534,64 @@ create function public.request_appointment(
   requested_address text, requested_notes text default null, join_waitlist boolean default false,
   requested_visit_count integer default 1, requested_extra_pet_count integer default 0
 )
-returns uuid language plpgsql security definer
+returns table(appointment_id uuid, appointment_status public.appointment_status, daily_confirmed_visits integer, max_daily_visits integer)
+language plpgsql security definer
 set search_path = public set row_security = off as $$
-declare duration integer; created_id uuid; daily_limit integer; day_count integer; owner_name text;
+declare
+  duration integer;
+  created_id uuid;
+  daily_limit integer := 15;
+  day_count integer;
+  owner_id uuid;
+  owner_name text;
+  final_status public.appointment_status;
+  day_start timestamptz;
+  day_end timestamptz;
 begin
-  if not public.user_owns_pet(requested_pet_id) then raise exception 'Bichano invalido'; end if;
-  if requested_starts_at <= now() then raise exception 'Escolha um horario futuro'; end if;
+  if not public.is_admin() and not public.user_owns_pet(requested_pet_id) then raise exception 'Bichano invalido'; end if;
+  if requested_starts_at <= now() then raise exception 'Escolha uma data futura'; end if;
   if requested_visit_count < 1 then raise exception 'Quantidade de visitas invalida'; end if;
   if requested_extra_pet_count < 0 then raise exception 'Quantidade de gatos extras invalida'; end if;
   select duration_minutes into duration from public.services where id = requested_service_id and active;
   if duration is null then raise exception 'Servico indisponivel'; end if;
-  select coalesce(value_integer, 4) into daily_limit from public.app_settings where key = 'max_daily_appointments';
-  select count(distinct starts_at) into day_count from public.appointments
-  where status <> 'cancelled'
-    and starts_at >= date_trunc('day', requested_starts_at at time zone 'America/Sao_Paulo') at time zone 'America/Sao_Paulo'
-    and starts_at < (date_trunc('day', requested_starts_at at time zone 'America/Sao_Paulo') + interval '1 day') at time zone 'America/Sao_Paulo';
-  if day_count >= daily_limit then
-    if join_waitlist then
-      insert into public.waitlist_requests(pet_id, service_id, requested_starts_at, address, client_notes)
-      values(requested_pet_id, requested_service_id, requested_starts_at, trim(requested_address), nullif(trim(requested_notes), ''))
-      returning id into created_id;
-      select profiles.full_name into owner_name from public.pets join public.profiles on profiles.id = pets.owner_id where pets.id = requested_pet_id;
-      insert into public.notifications(user_id, title, body, kind, related_id)
-      select profiles.id, 'Pedido de encaixe', coalesce(nullif(owner_name, ''), 'Cliente') || ' entrou na lista de espera para ' ||
-        to_char(requested_starts_at at time zone 'America/Sao_Paulo', 'DD/MM/YYYY HH24:MI'),
-        'waitlist_request', created_id
-      from public.profiles
-      where role = 'admin' and active;
-      return created_id;
-    end if;
-    raise exception 'Este dia esta lotado. Voce pode entrar na lista de espera para pedir um encaixe.';
-  end if;
-  insert into public.appointments(pet_id, service_id, starts_at, ends_at, address, client_notes, visit_count, extra_pet_count)
+
+  day_start := date_trunc('day', requested_starts_at at time zone 'America/Sao_Paulo') at time zone 'America/Sao_Paulo';
+  day_end := day_start + interval '1 day';
+  perform pg_advisory_xact_lock(hashtext('appointments_daily_limit:' || to_char(day_start, 'YYYY-MM-DD')));
+
+  select coalesce(sum(greatest(visit_count, 1)), 0) into day_count
+  from public.appointments
+  where status = 'confirmed'
+    and starts_at >= day_start
+    and starts_at < day_end;
+
+  final_status := case
+    when day_count + requested_visit_count <= daily_limit then 'confirmed'::public.appointment_status
+    else 'waitlisted'::public.appointment_status
+  end;
+
+  insert into public.appointments(pet_id, service_id, starts_at, ends_at, status, address, client_notes, visit_count, extra_pet_count)
   values(requested_pet_id, requested_service_id, requested_starts_at,
-    requested_starts_at + make_interval(mins => duration), trim(requested_address),
+    requested_starts_at + make_interval(mins => duration), final_status, trim(requested_address),
     nullif(trim(requested_notes), ''), requested_visit_count, requested_extra_pet_count) returning id into created_id;
-  return created_id;
+
+  select pets.owner_id, profiles.full_name into owner_id, owner_name
+  from public.pets
+  join public.profiles on profiles.id = pets.owner_id
+  where pets.id = requested_pet_id;
+
+  if final_status = 'waitlisted' then
+    insert into public.notifications(user_id, title, body, kind, related_id)
+    select profiles.id, 'Pedido de encaixe/reserva', coalesce(nullif(owner_name, ''), 'Cliente') ||
+      ' entrou em encaixe/reserva para ' || to_char(requested_starts_at at time zone 'America/Sao_Paulo', 'DD/MM/YYYY'),
+      'appointment', created_id
+    from public.profiles
+    where role = 'admin' and active;
+  end if;
+
+  return query select created_id, final_status,
+    day_count + case when final_status = 'confirmed' then requested_visit_count else 0 end,
+    daily_limit;
 end;
 $$;
 
@@ -578,7 +601,16 @@ create function public.manage_waitlist_request(
 )
 returns uuid language plpgsql security definer
 set search_path = public set row_security = off as $$
-declare selected public.waitlist_requests%rowtype; duration integer; created_id uuid; owner uuid; final_starts_at timestamptz;
+declare
+  selected public.waitlist_requests%rowtype;
+  duration integer;
+  created_id uuid;
+  owner uuid;
+  final_starts_at timestamptz;
+  day_start timestamptz;
+  day_end timestamptz;
+  day_count integer;
+  daily_limit integer := 15;
 begin
   if not public.is_admin() then raise exception 'Apenas administradores podem organizar encaixes'; end if;
   select * into selected from public.waitlist_requests where id = target_waitlist_id for update;
@@ -590,13 +622,28 @@ begin
     select owner_id into owner from public.pets where id = selected.pet_id;
     insert into public.notifications(user_id, title, body, kind, related_id)
     values(owner, 'Pedido de encaixe revisado',
-      'Nao conseguimos encaixar este horario no momento. Fale conosco se quiser tentar outra data.',
+      'Nao conseguimos encaixar esta rota no momento. Fale conosco se quiser tentar outra data.',
       'waitlist_request', target_waitlist_id);
     return null;
   elsif review_action = 'approve' then
     select duration_minutes into duration from public.services where id = selected.service_id;
     if duration is null then raise exception 'Servico indisponivel'; end if;
     final_starts_at := coalesce(requested_starts_at, selected.requested_starts_at);
+
+    day_start := date_trunc('day', final_starts_at at time zone 'America/Sao_Paulo') at time zone 'America/Sao_Paulo';
+    day_end := day_start + interval '1 day';
+    perform pg_advisory_xact_lock(hashtext('appointments_daily_limit:' || to_char(day_start, 'YYYY-MM-DD')));
+
+    select coalesce(sum(greatest(visit_count, 1)), 0) into day_count
+    from public.appointments
+    where status = 'confirmed'
+      and starts_at >= day_start
+      and starts_at < day_end;
+
+    if day_count + 1 > daily_limit then
+      raise exception 'Limite de 15 visitas agendadas para esta data atingido';
+    end if;
+
     insert into public.appointments(pet_id, service_id, assigned_to, starts_at, ends_at, status, address, client_notes, internal_notes)
     values(selected.pet_id, selected.service_id, requested_assigned_to, final_starts_at,
       final_starts_at + make_interval(mins => duration), 'confirmed', selected.address,
@@ -617,17 +664,48 @@ create function public.manage_appointment(
 )
 returns void language plpgsql security definer
 set search_path = public set row_security = off as $$
-declare duration integer;
+declare
+  selected public.appointments%rowtype;
+  duration integer;
+  final_starts_at timestamptz;
+  day_start timestamptz;
+  day_end timestamptz;
+  day_count integer;
+  daily_limit integer := 15;
 begin
   if not public.is_admin() then raise exception 'Apenas administradores podem organizar a agenda'; end if;
-  select services.duration_minutes into duration from public.appointments
-  join public.services on services.id = appointments.service_id
-  where appointments.id = target_appointment_id;
-  if duration is null then raise exception 'Agendamento nao encontrado'; end if;
+  if requested_status = 'completed' then raise exception 'Conclua a visita pelo fechamento financeiro'; end if;
+
+  select * into selected from public.appointments
+  where id = target_appointment_id
+  for update;
+  if not found then raise exception 'Agendamento nao encontrado'; end if;
+
+  select duration_minutes into duration from public.services where id = selected.service_id;
+  if duration is null then raise exception 'Servico indisponivel'; end if;
+
+  final_starts_at := coalesce(requested_starts_at, selected.starts_at);
+
+  if requested_status = 'confirmed' then
+    day_start := date_trunc('day', final_starts_at at time zone 'America/Sao_Paulo') at time zone 'America/Sao_Paulo';
+    day_end := day_start + interval '1 day';
+    perform pg_advisory_xact_lock(hashtext('appointments_daily_limit:' || to_char(day_start, 'YYYY-MM-DD')));
+
+    select coalesce(sum(greatest(visit_count, 1)), 0) into day_count
+    from public.appointments
+    where status = 'confirmed'
+      and id <> target_appointment_id
+      and starts_at >= day_start
+      and starts_at < day_end;
+
+    if day_count + greatest(selected.visit_count, 1) > daily_limit then
+      raise exception 'Limite de 15 visitas agendadas para esta data atingido';
+    end if;
+  end if;
+
   update public.appointments set status = requested_status, assigned_to = requested_assigned_to,
-    starts_at = coalesce(requested_starts_at, starts_at),
-    ends_at = case when requested_starts_at is null then ends_at
-      else requested_starts_at + make_interval(mins => duration) end
+    starts_at = final_starts_at,
+    ends_at = final_starts_at + make_interval(mins => duration)
   where id = target_appointment_id;
 end;
 $$;
@@ -639,20 +717,42 @@ create function public.review_appointment_request(
 )
 returns void language plpgsql security definer
 set search_path = public set row_security = off as $$
-declare selected public.appointments%rowtype; sitter public.profiles%rowtype;
+declare
+  selected public.appointments%rowtype;
+  sitter public.profiles%rowtype;
+  day_start timestamptz;
+  day_end timestamptz;
+  day_count integer;
+  daily_limit integer := 15;
 begin
   if not public.is_admin() then raise exception 'Apenas administradores podem revisar solicitacoes'; end if;
   select * into selected from public.appointments
   where id = target_appointment_id
   for update;
   if not found then raise exception 'Agendamento nao encontrado'; end if;
-  if selected.status <> 'requested' then raise exception 'Esta solicitacao ja foi revisada'; end if;
+  if selected.status not in ('requested', 'waitlisted') then raise exception 'Esta solicitacao ja foi revisada'; end if;
 
   if review_action = 'approve' then
     if requested_assigned_to is null then raise exception 'Escolha a baba responsavel'; end if;
     select * into sitter from public.profiles
     where id = requested_assigned_to and role in ('staff', 'admin') and active;
     if not found then raise exception 'Baba responsavel indisponivel'; end if;
+
+    day_start := date_trunc('day', selected.starts_at at time zone 'America/Sao_Paulo') at time zone 'America/Sao_Paulo';
+    day_end := day_start + interval '1 day';
+    perform pg_advisory_xact_lock(hashtext('appointments_daily_limit:' || to_char(day_start, 'YYYY-MM-DD')));
+
+    select coalesce(sum(greatest(visit_count, 1)), 0) into day_count
+    from public.appointments
+    where status = 'confirmed'
+      and id <> target_appointment_id
+      and starts_at >= day_start
+      and starts_at < day_end;
+
+    if day_count + greatest(selected.visit_count, 1) > daily_limit then
+      raise exception 'Limite de 15 visitas agendadas para esta data atingido';
+    end if;
+
     update public.appointments
     set status = 'confirmed',
         assigned_to = requested_assigned_to
@@ -685,7 +785,7 @@ begin
 
   if not found then raise exception 'Agendamento nao encontrado'; end if;
   if selected.status = 'cancelled' then return; end if;
-  if selected.status not in ('requested', 'confirmed') then
+  if selected.status not in ('requested', 'confirmed', 'waitlisted') then
     raise exception 'Esta visita nao pode mais ser cancelada pelo app';
   end if;
 
@@ -695,16 +795,109 @@ begin
 end;
 $$;
 
-create function public.record_visit(target_appointment_id uuid, visit_note text, complete_visit boolean default false)
+create function public.record_visit(
+  target_appointment_id uuid,
+  visit_note text,
+  complete_visit boolean default false,
+  admin_payment_status public.payment_status default null,
+  financial_note text default null
+)
 returns void language plpgsql security definer
 set search_path = public set row_security = off as $$
+declare
+  selected public.appointments%rowtype;
+  owner uuid;
+  payment_id uuid;
+  amount integer;
+  discount integer;
+  enabled boolean;
 begin
   if not public.is_admin() and not public.staff_is_assigned_to_appointment(target_appointment_id)
     then raise exception 'Atendimento nao atribuido'; end if;
+
+  select * into selected from public.appointments where id = target_appointment_id for update;
+  if not found then raise exception 'Agendamento nao encontrado'; end if;
+
+  if complete_visit and public.is_admin() and (admin_payment_status is null or admin_payment_status not in ('pending', 'paid')) then
+    raise exception 'Defina se a visita concluida ficou pendente de pagamento ou foi paga';
+  end if;
+
   insert into public.appointment_notes(appointment_id, created_by, note)
   values(target_appointment_id, auth.uid(), trim(visit_note));
-  update public.appointments set status = case when complete_visit then 'completed' else 'in_progress' end
+
+  update public.appointments
+  set status = case
+        when complete_visit then 'completed'::public.appointment_status
+        else 'in_progress'::public.appointment_status
+      end,
+      completed_at = case when complete_visit then coalesce(completed_at, now()) else completed_at end
   where id = target_appointment_id;
+
+  if complete_visit and public.is_admin() then
+    select pets.owner_id into owner from public.pets where id = selected.pet_id;
+
+    select payments.amount_cents into amount
+    from public.payments
+    where appointment_id = target_appointment_id;
+
+    if amount is null then
+      select coalesce(custom.amount_cents, base.price_cents) into amount
+      from public.service_prices base
+      left join public.client_service_prices custom on custom.service_id = base.service_id
+        and custom.client_id = owner and custom.active
+      where base.service_id = selected.service_id;
+
+      select max(codes.discount_value) into discount
+      from public.discount_redemptions redemption
+      join public.discount_codes codes on codes.id = redemption.discount_code_id
+      where redemption.client_id = owner and redemption.cancelled_at is null
+        and (redemption.valid_until is null or redemption.valid_until >= selected.starts_at) and codes.active;
+
+      amount := greatest(coalesce(amount, 1) - coalesce(discount, 0), 1)
+        * greatest(selected.visit_count, 1)
+        + greatest(selected.extra_pet_count, 0) * 1000 * greatest(selected.visit_count, 1);
+    end if;
+
+    amount := greatest(coalesce(amount, 1), 1);
+
+    insert into public.payments(appointment_id, amount_cents, due_date, status, paid_at, payment_notes)
+    values (
+      target_appointment_id,
+      amount,
+      selected.starts_at::date,
+      admin_payment_status,
+      case when admin_payment_status = 'paid' then now() else null end,
+      nullif(trim(coalesce(financial_note, '')), '')
+    )
+    on conflict(appointment_id) do update set
+      amount_cents = excluded.amount_cents,
+      due_date = excluded.due_date,
+      status = excluded.status,
+      paid_at = case when excluded.status = 'paid' then coalesce(public.payments.paid_at, now()) else null end,
+      reminder_sent_at = case when excluded.status = 'paid' then null else public.payments.reminder_sent_at end,
+      payment_notes = excluded.payment_notes
+    returning id into payment_id;
+
+    if admin_payment_status = 'paid' then
+      delete from public.notifications
+      where related_id = payment_id and kind in ('payment_due', 'payment_overdue');
+    else
+      select payments into enabled from public.notification_preferences where user_id = owner;
+      if coalesce(enabled, true) then
+        delete from public.notifications
+        where user_id = owner and related_id = payment_id and kind in ('payment_due', 'payment_overdue');
+
+        insert into public.notifications(user_id, title, body, kind, related_id)
+        values (
+          owner,
+          'Pagamento pendente',
+          'Existe um debito pendente de ' || to_char(amount / 100.0, 'FM999G999G990D00') || ' referente a visita concluida.',
+          'payment_due',
+          payment_id
+        );
+      end if;
+    end if;
+  end if;
 end;
 $$;
 
@@ -730,7 +923,8 @@ begin
   end if;
 
   update public.appointments
-  set status = requested_status
+  set status = requested_status,
+      completed_at = case when requested_status = 'completed' then coalesce(completed_at, now()) else completed_at end
   where id = target_appointment_id and assigned_to = auth.uid();
 end;
 $$;
@@ -796,16 +990,21 @@ set search_path = public set row_security = off as $$
 declare created_count integer;
 begin
   if auth.uid() is not null and not public.is_admin() then raise exception 'Apenas administradores'; end if;
-  update public.payments set status = 'overdue'::public.payment_status where status = 'pending' and due_date < current_date;
+  update public.payments set status = 'overdue'::public.payment_status
+  where status = 'pending' and due_date < current_date;
+
   with inserted as (
     insert into public.notifications(user_id, title, body, kind, related_id)
     select pets.owner_id, 'Lembrete de pagamento',
-      'Existe um pagamento pendente com vencimento em ' || to_char(payments.due_date, 'DD/MM/YYYY'),
+      'Existe um pagamento pendente de ' || to_char(payments.amount_cents / 100.0, 'FM999G999G990D00') ||
+        ' referente a visita concluida em ' || to_char(appointments.completed_at at time zone 'America/Sao_Paulo', 'DD/MM/YYYY'),
       'payment_overdue', payments.id
     from public.payments
     join public.appointments on appointments.id = payments.appointment_id
     join public.pets on pets.id = appointments.pet_id
-    where payments.status = 'overdue' and payments.reminder_sent_at is null
+    where payments.status in ('pending', 'overdue')
+      and appointments.status = 'completed'
+      and (payments.reminder_sent_at is null or payments.reminder_sent_at <= now() - interval '3 days')
     returning related_id
   )
   update public.payments set reminder_sent_at = now() where id in (select related_id from inserted);
@@ -890,15 +1089,18 @@ begin
       owner,
       case new.status
         when 'confirmed' then 'Agendamento confirmado'
+        when 'waitlisted' then 'Pedido em encaixe/reserva'
         when 'in_progress' then 'Visita em andamento'
         when 'completed' then 'Visita concluida'
         when 'cancelled' then case when tg_op = 'UPDATE' and old.status = 'requested' then 'Solicitacao recusada' else 'Agendamento cancelado' end
         else 'Solicitacao recebida'
       end,
       case
-        when new.status = 'cancelled' and tg_op = 'UPDATE' and old.status = 'requested'
-          then 'Nao conseguimos atender esta solicitacao. Fale conosco se quiser tentar outro horario.'
-        else 'Atendimento em ' || to_char(new.starts_at at time zone 'America/Sao_Paulo', 'DD/MM/YYYY HH24:MI')
+        when new.status = 'cancelled' and tg_op = 'UPDATE' and old.status in ('requested', 'waitlisted')
+          then 'Nao conseguimos atender esta solicitacao. Fale conosco se quiser tentar outra data.'
+        when new.status = 'waitlisted'
+          then 'O limite de 15 visitas para esta data foi atingido. Seu pedido ficou como encaixe/reserva e aguarda confirmacao.'
+        else 'Atendimento em ' || to_char(new.starts_at at time zone 'America/Sao_Paulo', 'DD/MM/YYYY') || '. A rota sera organizada pela administradora.'
       end,
       'appointment',
       new.id
@@ -1020,7 +1222,7 @@ insert into public.app_settings(key, value_integer)
 values ('standard_visit_price_cents', 5500);
 
 insert into public.app_settings(key, value_integer)
-values ('max_daily_appointments', 4);
+values ('max_daily_appointments', 15);
 
 insert into storage.buckets(id, name, public)
 values ('pet-photos', 'pet-photos', false)

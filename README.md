@@ -8,7 +8,7 @@ Web app mobile-first para gestão de cuidados felinos.
 - React 19
 - TypeScript
 - CSS Modules
-- Supabase Auth, Postgres, Storage e Edge Functions
+- Supabase Auth, Postgres e Storage
 
 ## Executar
 
@@ -44,34 +44,29 @@ apaga o schema `public` e recria o backend completo. Arquivos antigos do bucket
 caso também queira eliminar as fotos. Não execute em produção com dados que
 precisem ser preservados.
 
-Publique a função de convite:
-
-```powershell
-npx supabase functions deploy invite-staff
-```
-
-Enquanto a verificação em duas etapas estiver pausada, mantenha o secret
-`REQUIRE_STAFF_MFA=false` na Edge Function.
-
-A função `invite-staff` valida a sessão dentro do próprio código. Por isso,
-`supabase/config.toml` mantém `verify_jwt = false`, permitindo que o preflight
-`OPTIONS` do navegador passe pelo CORS antes do `POST` autenticado.
-
 Se o Supabase CLI mostrar `Access token not provided`, autentique primeiro:
 
 ```powershell
 npx supabase login --token SEU_ACCESS_TOKEN
 ```
 
-Crie o token em `Account > Access Tokens` no painel do Supabase. Depois publique
-e configure os secrets:
-
-```powershell
-npx supabase functions deploy invite-staff --project-ref esbwbjuksedcdtkexoiv
-npx supabase secrets set --project-ref esbwbjuksedcdtkexoiv REQUIRE_STAFF_MFA=false
-```
+Crie o token em `Account > Access Tokens` no painel do Supabase.
 
 Nunca coloque a chave `service_role` no navegador.
+
+### Organização do SQL
+
+O arquivo `supabase/reset_and_setup.sql` é a fonte canônica do backend atual.
+Ele já inclui tabelas, tipos, funções RPC, políticas RLS, triggers, Storage e
+dados iniciais.
+
+Os arquivos em `supabase/patches/` são histórico de correções já incorporadas
+ao setup consolidado. Use-os apenas como referência ao investigar mudanças
+antigas; para configurar um ambiente novo, rode somente `reset_and_setup.sql`.
+
+A pasta `supabase/functions/invite-staff/` também é legado. O cadastro de babás
+ativo no app usa a RPC `admin_register_staff`, chamada diretamente pelo painel
+administrativo.
 
 ### E-mail de confirmação
 

@@ -89,6 +89,13 @@ type ClientDetail = {
   pets: ClientPetDetail[];
 };
 type PaymentView = { id: string; amountCents: number; dueDate: string; status: string; pet: string; service: string; tutor: string };
+type FinancialPaymentView = PaymentView & {
+  appointmentId: string;
+  visitDate: string;
+  sitter: string;
+  paidAt: string | null;
+  notes: string;
+};
 type NotificationView = { id: string; title: string; body: string };
 type WaitlistRequestView = {
   id: string;
@@ -133,6 +140,10 @@ type AdminMetrics = {
   pets: number;
   waitlist: number;
   pendingCents: number;
+  receivedCents: number;
+  pendingCount: number;
+  paidCount: number;
+  completedCount: number;
   overdueCents: number;
   overdueCount: number;
 };
@@ -185,7 +196,7 @@ const demoServices = [
 
 const demoPets = [
   { icon: "●", name: "Mel", description: "Fêmea • Persa • 3 anos • Sem medicação contínua" },
-  { icon: "●", name: "Frodo", description: "Macho • SRD • 5 anos • Medicação às 14h30" },
+  { icon: "●", name: "Frodo", description: "Macho • SRD • 5 anos • Medicação com orientação cadastrada" },
 ];
 
 const demoAppointments: AppointmentView[] = [
@@ -224,6 +235,24 @@ function errorMessage(error: unknown, fallback: string) {
     return String((error as { message?: unknown }).message || fallback);
   }
   return fallback;
+}
+
+function databaseErrorCode(error: unknown) {
+  return error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code || "") : "";
+}
+
+function isMissingRpcSignature(error: unknown, rpcName: string) {
+  const code = databaseErrorCode(error);
+  const message = errorMessage(error, "").toLowerCase();
+  return ["42883", "PGRST202"].includes(code)
+    || (message.includes(rpcName.toLowerCase()) && message.includes("schema cache"))
+    || (message.includes("could not find") && message.includes(rpcName.toLowerCase()))
+    || (message.includes("function") && message.includes(rpcName.toLowerCase()) && message.includes("not found"));
+}
+
+function isAppointmentStatusCastError(error: unknown) {
+  const message = errorMessage(error, "").toLowerCase();
+  return message.includes("appointment_status") && message.includes("type text");
 }
 
 function startOfLocalDay(date: Date) {
@@ -297,6 +326,19 @@ function formatMoney(cents: number) {
   return new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(cents / 100);
 }
 
+function daysOpen(dateKey: string) {
+  const start = startOfLocalDay(new Date(`${dateKey}T12:00:00`)).getTime();
+  const today = startOfLocalDay(new Date()).getTime();
+  if (!Number.isFinite(start)) return 0;
+  return Math.max(Math.floor((today - start) / 86400000), 0);
+}
+
+function paymentStatusLabel(status: string) {
+  if (status === "paid") return "CONCLUIDA - PAGA";
+  if (status === "overdue") return "CONCLUIDA - PENDENTE DE PAGAMENTO";
+  return "CONCLUIDA - PENDENTE DE PAGAMENTO";
+}
+
 function mapAppointment(row: Record<string, unknown>): AppointmentView {
   const startsAt = new Date(String(row.starts_at));
   const pet = relation(row.pet);
@@ -307,6 +349,7 @@ function mapAppointment(row: Record<string, unknown>): AppointmentView {
   const statusLabels: Record<string, string> = {
     requested: "Solicitada",
     confirmed: "Confirmada",
+    waitlisted: "Encaixe/reserva",
     in_progress: "Em andamento",
     completed: "Concluída",
     cancelled: "Cancelada",
@@ -316,7 +359,7 @@ function mapAppointment(row: Record<string, unknown>): AppointmentView {
     id: String(row.id),
     date: new Intl.DateTimeFormat("pt-BR", { weekday: "long", day: "2-digit", month: "long" }).format(startsAt),
     dateKey: localDateKey(startsAt),
-    time: rawStatus === "requested" ? "ROTA" : startsAt.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }),
+    time: rawStatus === "requested" || rawStatus === "waitlisted" ? "ROTA" : startsAt.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }),
     pet: String(pet.name || "Bichano não informado"),
     service: String(service.name || "Serviço não informado"),
     tutor: String(owner.full_name || "Tutor não informado"),
@@ -330,18 +373,25 @@ function mapAppointment(row: Record<string, unknown>): AppointmentView {
   };
 }
 
-function mapPayment(row: Record<string, unknown>): PaymentView {
+function mapPayment(row: Record<string, unknown>): FinancialPaymentView {
   const appointment = relation(row.appointment);
   const pet = relation(appointment.pet);
   const service = relation(appointment.service);
+  const sitter = relation(appointment.sitter);
+  const startsAt = new Date(String(appointment.starts_at || row.due_date || ""));
   return {
     id: String(row.id),
+    appointmentId: String(appointment.id || ""),
     amountCents: Number(row.amount_cents || 0),
     dueDate: String(row.due_date || ""),
     status: String(row.status || "pending"),
     pet: String(pet.name || "Bichano não informado"),
     service: String(service.name || "Serviço não informado"),
     tutor: String(relation(pet.owner).full_name || "Tutor não informado"),
+    sitter: String(sitter.full_name || "Não atribuída"),
+    visitDate: Number.isFinite(startsAt.getTime()) ? localDateKey(startsAt) : String(row.due_date || ""),
+    paidAt: row.paid_at ? String(row.paid_at) : null,
+    notes: String(row.payment_notes || ""),
   };
 }
 
@@ -374,13 +424,15 @@ function mapWaitlistRequest(row: Record<string, unknown>): WaitlistRequestView {
 
 function isRouteAppointment(appointment: AppointmentView) {
   return appointment.rawStatus === "requested"
+    || appointment.rawStatus === "waitlisted"
     || appointment.status === "Solicitada"
+    || appointment.status === "Encaixe/reserva"
     || appointment.status === "Pendente"
     || appointment.time === "12:00";
 }
 
-function appointmentTimeLabel(appointment: AppointmentView) {
-  return isRouteAppointment(appointment) ? "ROTA" : appointment.time;
+function appointmentTimeLabel() {
+  return "ROTA";
 }
 
 function appointmentCalendarDateKeys(appointment: AppointmentView) {
@@ -477,7 +529,7 @@ export function BichanoApp() {
   const [realServices, setRealServices] = useState<ServiceView[]>([]);
   const [realStaff, setRealStaff] = useState<StaffView[]>([]);
   const [realClients, setRealClients] = useState<ClientView[]>([]);
-  const [realPayments, setRealPayments] = useState<PaymentView[]>([]);
+  const [realPayments, setRealPayments] = useState<FinancialPaymentView[]>([]);
   const [realNotifications, setRealNotifications] = useState<NotificationView[]>([]);
   const [realWaitlistRequests, setRealWaitlistRequests] = useState<WaitlistRequestView[]>([]);
   const [clearedHistoryIds, setClearedHistoryIds] = useState<string[]>([]);
@@ -489,6 +541,10 @@ export function BichanoApp() {
     pets: 0,
     waitlist: 0,
     pendingCents: 0,
+    receivedCents: 0,
+    pendingCount: 0,
+    paidCount: 0,
+    completedCount: 0,
     overdueCents: 0,
     overdueCount: 0,
   });
@@ -540,8 +596,11 @@ export function BichanoApp() {
   const [managedStatus, setManagedStatus] = useState("requested");
   const [managedStaffId, setManagedStaffId] = useState("");
   const [managedStartsAt, setManagedStartsAt] = useState("");
+  const [adminCompletionPaymentStatus, setAdminCompletionPaymentStatus] = useState<"pending" | "paid">("pending");
+  const [adminFinancialNotes, setAdminFinancialNotes] = useState("");
   const [selectedCalendarDateKey, setSelectedCalendarDateKey] = useState("");
   const [visitNote, setVisitNote] = useState("");
+  const [visitActionError, setVisitActionError] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [showNewPassword, setShowNewPassword] = useState(false);
 
@@ -555,6 +614,9 @@ export function BichanoApp() {
   });
   const approvedAppointments = visibleAppointments.filter((appointment) => (
     appointment.rawStatus === "confirmed" || appointment.rawStatus === "in_progress" || appointment.status === "Confirmada" || appointment.status === "Em andamento"
+  ));
+  const waitlistedAppointments = visibleAppointments.filter((appointment) => (
+    appointment.rawStatus === "waitlisted" || appointment.status === "Encaixe/reserva"
   ));
   const selectedCalendarAppointments = selectedCalendarDateKey
     ? approvedAppointments.filter((appointment) => appointmentCalendarDateKeys(appointment).includes(selectedCalendarDateKey))
@@ -589,7 +651,9 @@ export function BichanoApp() {
   const myAppointments = role === "admin"
     ? visibleAppointments.filter((appointment) => appointment.sitterId === profileId)
     : visibleAppointments;
-  const nextPayment = realPayments[0];
+  const pendingPayments = realPayments.filter((payment) => payment.status === "pending" || payment.status === "overdue");
+  const paidPayments = realPayments.filter((payment) => payment.status === "paid");
+  const nextPayment = pendingPayments[0];
   const pendingClients = realClients.filter((client) => !client.active);
   const todayLabel = new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "long" }).format(new Date());
   const firstName = profileName.trim().split(" ")[0] || (role === "staff" ? "Babá" : role === "admin" ? "Equipe" : "Cliente");
@@ -1289,7 +1353,7 @@ export function BichanoApp() {
       const todayStart = startOfLocalDay(new Date());
       const historyStart = new Date(todayStart);
       historyStart.setMonth(historyStart.getMonth() - 6);
-      appointmentQuery.gte("starts_at", currentRole === "admin" ? historyStart.toISOString() : new Date().toISOString());
+      appointmentQuery.gte("starts_at", historyStart.toISOString());
 
       const { data: appointmentRows, error: appointmentError } = await appointmentQuery.limit(50);
       if (appointmentError) throw appointmentError;
@@ -1363,15 +1427,20 @@ export function BichanoApp() {
           amount_cents,
           due_date,
           status,
+          paid_at,
+          payment_notes,
           appointment:appointments!payments_appointment_id_fkey(
+            id,
+            starts_at,
             pet:pets!appointments_pet_id_fkey(
               name,
               owner:profiles!pets_owner_id_fkey(full_name)
             ),
-            service:services!appointments_service_id_fkey(name)
+            service:services!appointments_service_id_fkey(name),
+            sitter:profiles!appointments_assigned_to_fkey(full_name)
           )
         `)
-        .in("status", ["pending", "overdue"])
+        .in("status", ["pending", "overdue", "paid"])
         .order("due_date");
       if (paymentError) throw paymentError;
       const mappedPayments = (paymentRows || []).map((row) => mapPayment(row as unknown as Record<string, unknown>));
@@ -1423,14 +1492,17 @@ export function BichanoApp() {
           supabase.from("profiles").select("id", { count: "exact", head: true }).eq("role", "client").eq("active", true),
           supabase.from("pets").select("id", { count: "exact", head: true }).eq("active", true),
           supabase.from("profiles").select("id, full_name, phone, role, active").in("role", ["staff", "admin"]).order("full_name"),
-          supabase.from("appointments").select("id", { count: "exact", head: true }).neq("status", "cancelled").gte("starts_at", todayStart.toISOString()).lt("starts_at", tomorrowStart.toISOString()),
+          supabase.from("appointments").select("id", { count: "exact", head: true }).in("status", ["confirmed", "in_progress", "completed"]).gte("starts_at", todayStart.toISOString()).lt("starts_at", tomorrowStart.toISOString()),
           supabase.from("appointments").select("id", { count: "exact", head: true }).eq("status", "completed").gte("starts_at", todayStart.toISOString()).lt("starts_at", tomorrowStart.toISOString()),
           supabase.from("appointments").select("id", { count: "exact", head: true }).eq("status", "requested"),
-          supabase.from("waitlist_requests").select("id", { count: "exact", head: true }).eq("status", "waiting"),
+          supabase.from("appointments").select("id", { count: "exact", head: true }).eq("status", "waitlisted"),
         ]);
         if (staffError) throw staffError;
 
-        const pendingCents = mappedPayments.filter((item) => item.status === "pending").reduce((sum, item) => sum + item.amountCents, 0);
+        const pendingFinancePayments = mappedPayments.filter((item) => item.status === "pending" || item.status === "overdue");
+        const paidFinancePayments = mappedPayments.filter((item) => item.status === "paid");
+        const pendingCents = pendingFinancePayments.reduce((sum, item) => sum + item.amountCents, 0);
+        const receivedCents = paidFinancePayments.reduce((sum, item) => sum + item.amountCents, 0);
         const overduePayments = mappedPayments.filter((item) => item.status === "overdue");
 
         setAdminMetrics({
@@ -1441,6 +1513,10 @@ export function BichanoApp() {
           pets: petCount || 0,
           waitlist: waitlistCount || 0,
           pendingCents,
+          receivedCents,
+          pendingCount: pendingFinancePayments.length,
+          paidCount: paidFinancePayments.length,
+          completedCount: pendingFinancePayments.length + paidFinancePayments.length,
           overdueCents: overduePayments.reduce((sum, item) => sum + item.amountCents, 0),
           overdueCount: overduePayments.length,
         });
@@ -1511,7 +1587,7 @@ export function BichanoApp() {
       const { error: notificationError } = await supabase
         .from("notifications")
         .delete()
-        .eq("kind", "payment_overdue")
+        .in("kind", ["payment_due", "payment_overdue"])
         .eq("related_id", paymentId);
       if (notificationError) throw notificationError;
 
@@ -1524,6 +1600,118 @@ export function BichanoApp() {
       notify(message);
     } finally {
       setPaymentSavingId("");
+    }
+  }
+
+  async function markAppointmentPaymentReceived(appointmentId: string, notes = "") {
+    if (!supabase || role !== "admin") return;
+
+    const { data, error } = await supabase
+      .from("payments")
+      .update({ status: "paid", paid_at: new Date().toISOString(), payment_notes: notes.trim() || null })
+      .eq("appointment_id", appointmentId)
+      .select("id")
+      .maybeSingle();
+    if (error) throw error;
+
+    if (data?.id) {
+      const { error: notificationError } = await supabase
+        .from("notifications")
+        .delete()
+        .in("kind", ["payment_due", "payment_overdue"])
+        .eq("related_id", data.id);
+      if (notificationError) throw notificationError;
+    }
+  }
+
+  async function syncCompletedVisitPayment(appointmentId: string, status: "pending" | "paid", notes = "") {
+    if (!supabase || role !== "admin") return;
+
+    if (status === "paid") {
+      await markAppointmentPaymentReceived(appointmentId, notes);
+      return;
+    }
+
+    const { data: existingPayment, error: paymentError } = await supabase
+      .from("payments")
+      .update({ status: "pending", paid_at: null, payment_notes: notes.trim() || null })
+      .eq("appointment_id", appointmentId)
+      .select("id, amount_cents")
+      .maybeSingle();
+    if (paymentError) throw paymentError;
+
+    const { data: appointment, error: appointmentError } = await supabase
+      .from("appointments")
+      .select("starts_at, pet:pets!appointments_pet_id_fkey(owner_id)")
+      .eq("id", appointmentId)
+      .maybeSingle();
+    if (appointmentError) throw appointmentError;
+
+    const ownerId = String(relation(appointment?.pet).owner_id || "");
+    let payment = existingPayment;
+    if (!payment) {
+      const dueDate = appointment?.starts_at ? localDateKey(new Date(String(appointment.starts_at))) : localDateKey(new Date());
+      const { data: insertedPayment, error: insertPaymentError } = await supabase
+        .from("payments")
+        .insert({
+          appointment_id: appointmentId,
+          amount_cents: 1,
+          due_date: dueDate,
+          status: "pending",
+          payment_notes: notes.trim() || null,
+        })
+        .select("id, amount_cents")
+        .maybeSingle();
+      if (insertPaymentError) throw insertPaymentError;
+      payment = insertedPayment;
+    }
+    if (!payment?.id || !ownerId) return;
+
+    const { error: cleanupError } = await supabase
+      .from("notifications")
+      .delete()
+      .in("kind", ["payment_due", "payment_overdue"])
+      .eq("related_id", payment.id);
+    if (cleanupError) throw cleanupError;
+
+    const { error: notificationError } = await supabase
+      .from("notifications")
+      .insert({
+        user_id: ownerId,
+        title: "Pagamento pendente",
+        body: `Existe um débito pendente de ${formatMoney(Number(payment.amount_cents || 0))} referente à visita concluída.`,
+        kind: "payment_due",
+        related_id: payment.id,
+      });
+    if (notificationError) throw notificationError;
+  }
+
+  async function saveVisitRecordDirect(appointmentId: string, note: string, completeVisit: boolean, adminPaymentStatus: "pending" | "paid") {
+    if (!supabase) return;
+
+    const { data: userData, error: userError } = await supabase.auth.getUser();
+    if (userError) throw userError;
+    const userId = userData.user?.id;
+    if (!userId) throw new Error("Sessao expirada. Entre novamente para concluir a visita.");
+
+    const { error: noteError } = await supabase
+      .from("appointment_notes")
+      .insert({ appointment_id: appointmentId, created_by: userId, note: note.trim() });
+    if (noteError) throw noteError;
+
+    const appointmentPayload: { status: "completed" | "in_progress"; completed_at?: string } = {
+      status: completeVisit ? "completed" : "in_progress",
+    };
+    if (completeVisit) appointmentPayload.completed_at = new Date().toISOString();
+
+    const { error: appointmentError } = await supabase
+      .from("appointments")
+      .update(appointmentPayload)
+      .eq("id", appointmentId);
+    if (appointmentError) throw appointmentError;
+
+    if (completeVisit && role === "admin") {
+      await syncCompletedVisitPayment(appointmentId, adminPaymentStatus, adminFinancialNotes);
     }
   }
 
@@ -1599,7 +1787,10 @@ export function BichanoApp() {
     setManagedStatus(appointment.rawStatus || "requested");
     setManagedStaffId(appointment.sitterId || "");
     setManagedStartsAt(appointment.startsAt ? appointment.startsAt.slice(0, 16) : "");
+    setAdminCompletionPaymentStatus("pending");
+    setAdminFinancialNotes("");
     setVisitNote("");
+    setVisitActionError("");
   }
 
   async function requestAppointment(joinWaitlist = false) {
@@ -1637,10 +1828,11 @@ export function BichanoApp() {
     ].filter(Boolean).join("\n");
 
     setActionBusy(true);
+    let createdStatus = "";
     try {
       if (supabase) {
-        if (role === "client") {
-          const { error } = await supabase.rpc("request_appointment", {
+        if (role === "client" || role === "admin") {
+          const { data, error } = await supabase.rpc("request_appointment", {
             requested_pet_id: primaryPetId,
             requested_service_id: selectedBookingService.id,
             requested_starts_at: startsAtOptions[0].toISOString(),
@@ -1651,19 +1843,8 @@ export function BichanoApp() {
             requested_extra_pet_count: Math.max(bookingPetIds.length - 1, 0),
           });
           if (error) throw error;
-        } else if (role === "admin") {
-          const { error } = await supabase.from("appointments").insert({
-            pet_id: primaryPetId,
-            service_id: selectedBookingService.id,
-            starts_at: startsAtOptions[0].toISOString(),
-            ends_at: new Date(startsAtOptions[0].getTime() + selectedBookingService.durationMinutes * 60000).toISOString(),
-            address: bookingAddress.trim(),
-            client_notes: bookingRequestNotes,
-            visit_count: bookingVisitCount,
-            extra_pet_count: Math.max(bookingPetIds.length - 1, 0),
-            status: "requested",
-          });
-          if (error) throw error;
+          const created = Array.isArray(data) ? data[0] : data;
+          createdStatus = String(created?.appointment_status || "");
         }
         await loadRealData(role);
       }
@@ -1675,7 +1856,9 @@ export function BichanoApp() {
       setBookingNotes("");
       setBookingError("");
       setBookingWaitlistAvailable(false);
-      notify(joinWaitlist
+      notify(createdStatus === "waitlisted"
+        ? "O limite de 15 visitas para essa data foi atingido. Seu pedido foi registrado como encaixe/reserva e aguarda confirmacao."
+        : joinWaitlist
         ? "Pedido de encaixe enviado para a administradora."
         : "Pedido de visita enviado.");
     } catch (error) {
@@ -1954,24 +2137,70 @@ export function BichanoApp() {
     }
   }
 
-  async function recordVisit(completeVisit: boolean) {
-    if (!supabase || !appointmentOpen || !visitNote.trim()) {
-      notify("Escreva o relatório da visita.");
+  async function saveVisitRecord(appointmentId: string, note: string, completeVisit: boolean, adminPaymentStatus: "pending" | "paid") {
+    if (!supabase) return;
+    const payload = {
+      target_appointment_id: appointmentId,
+      visit_note: note,
+      complete_visit: completeVisit,
+      admin_payment_status: completeVisit && role === "admin" ? adminPaymentStatus : null,
+      financial_note: completeVisit && role === "admin" ? adminFinancialNotes.trim() || null : null,
+    };
+    const { error } = await supabase.rpc("record_visit", payload);
+    if (!error) return;
+    if (isAppointmentStatusCastError(error)) {
+      await saveVisitRecordDirect(appointmentId, note, completeVisit, adminPaymentStatus);
+      return;
+    }
+    if (!isMissingRpcSignature(error, "record_visit")) throw error;
+
+    const { error: legacyError } = await supabase.rpc("record_visit", {
+      target_appointment_id: appointmentId,
+      visit_note: note,
+      complete_visit: completeVisit,
+    });
+    if (legacyError && isAppointmentStatusCastError(legacyError)) {
+      await saveVisitRecordDirect(appointmentId, note, completeVisit, adminPaymentStatus);
+      return;
+    }
+    if (legacyError) throw legacyError;
+
+    if (completeVisit && role === "admin") {
+      await syncCompletedVisitPayment(appointmentId, adminPaymentStatus, adminFinancialNotes);
+    }
+  }
+
+  async function recordVisit(completeVisit: boolean, adminPaymentStatus: "pending" | "paid" = "pending") {
+    if (!supabase || !appointmentOpen) return;
+    setVisitActionError("");
+    const trimmedVisitNote = visitNote.trim();
+    if (!trimmedVisitNote && (!completeVisit || role !== "admin")) {
+      const message = "Escreva o relatório da visita.";
+      setVisitActionError(message);
+      notify(message);
       return;
     }
     setActionBusy(true);
     try {
-      const { error } = await supabase.rpc("record_visit", {
-        target_appointment_id: appointmentOpen.id,
-        visit_note: visitNote.trim(),
-        complete_visit: completeVisit,
-      });
-      if (error) throw error;
+      await saveVisitRecord(
+        appointmentOpen.id,
+        trimmedVisitNote || "Visita concluida pela administracao.",
+        completeVisit,
+        adminPaymentStatus,
+      );
       await loadRealData(role);
       setAppointmentOpen(null);
-      notify(completeVisit ? "Visita concluída e relatório enviado." : "Relatório salvo.");
+      notify(
+        completeVisit
+          ? adminPaymentStatus === "paid"
+            ? "Visita concluída e pagamento marcado como recebido."
+            : "Visita concluída com débito em aberto."
+          : "Relatório salvo.",
+      );
     } catch (error) {
-      notify(error instanceof Error ? error.message : "Não foi possível salvar o relatório.");
+      const message = databaseErrorMessage(error, "Não foi possível salvar o relatório.");
+      setVisitActionError(message);
+      notify(message);
     } finally {
       setActionBusy(false);
     }
@@ -2385,7 +2614,6 @@ export function BichanoApp() {
   const navItems: Record<Role, { page: Page; icon: string; label: string }[]> = {
     client: [
       { page: "home", icon: "⌂", label: "Início" },
-      { page: "services", icon: "♡", label: "Cuidados" },
       { page: "pets", icon: "●", label: "Bichanos" },
       { page: "calendar", icon: "□", label: "Agenda" },
     ],
@@ -2584,7 +2812,7 @@ export function BichanoApp() {
             <article className={styles.hero}>
               <span className={styles.pill}>{nextAppointment ? nextAppointment.status : "Agenda livre"}</span>
               <h1>{nextAppointment ? `${nextAppointment.pet} • ${nextAppointment.service}` : "Nenhuma visita agendada."}</h1>
-              <p>{nextAppointment ? `${nextAppointment.date}, às ${nextAppointment.time}.` : "Quando uma visita for confirmada, os detalhes aparecerão aqui."}</p>
+              <p>{nextAppointment ? `${nextAppointment.date}. A rota do dia sera organizada pela administradora.` : "Quando uma visita for confirmada, os detalhes aparecerão aqui."}</p>
               <span className={styles.heroCat}>◕</span>
             </article>
             <div className={styles.quickGrid}>
@@ -2598,9 +2826,9 @@ export function BichanoApp() {
               <span className={styles.paymentIcon}>R$</span>
               <span>
                 <strong>{nextPayment.status === "overdue" ? "Pagamento em atraso" : "Pagamento pendente"}</strong>
-                <small>{nextPayment.service} de {nextPayment.pet} • vence em {formatDate(nextPayment.dueDate)}</small>
+                <small>{formatMoney(nextPayment.amountCents)} • {nextPayment.service} de {nextPayment.pet} • vence em {formatDate(nextPayment.dueDate)}</small>
               </span>
-              <button onClick={() => notify("O pagamento é feito diretamente com a Bichano que Amo. O app apenas acompanha o vencimento.")}>Ver detalhes</button>
+              <button onClick={() => notify(`Valor devido: ${formatMoney(nextPayment.amountCents)}. Chave Pix: 11962393587 - PagSeguro - Bárbara Alves`)}>Ver detalhes</button>
             </article>}
             {realNotifications.length > 0 && <>
               <SectionTitle title="Avisos" />
@@ -2664,7 +2892,7 @@ export function BichanoApp() {
         )}
 
         {page === "calendar" && (
-          <Page title="Agenda" intro="Horários exibidos no fuso de Brasília.">
+          <Page title="Agenda" intro="As visitas sao organizadas internamente pela administradora conforme a rota do dia.">
             <Calendar
               appointments={approvedAppointments}
               selectedDateKey={selectedCalendarDateKey}
@@ -2706,7 +2934,11 @@ export function BichanoApp() {
             <article className={styles.financeCard}>
               <SectionTitle title="Controle de pagamentos" action="Ver pendências" onClick={() => setPage("payments")} />
               <div>
-                <span><small>Valores aguardando confirmação</small><strong>{formatMoney(adminMetrics.pendingCents)}</strong></span>
+                <span><small>Total recebido</small><strong>{formatMoney(adminMetrics.receivedCents)}</strong></span>
+                <span><small>Total pendente</small><strong>{formatMoney(adminMetrics.pendingCents)}</strong></span>
+                <span><small>Visitas pendentes</small><strong>{adminMetrics.pendingCount}</strong></span>
+                <span><small>Visitas pagas</small><strong>{adminMetrics.paidCount}</strong></span>
+                <span><small>Concluidas no financeiro</small><strong>{adminMetrics.completedCount}</strong></span>
                 <span><small>{adminMetrics.overdueCount} vencida{adminMetrics.overdueCount === 1 ? "" : "s"}</small><strong>{formatMoney(adminMetrics.overdueCents)}</strong></span>
               </div>
             </article>
@@ -2718,7 +2950,13 @@ export function BichanoApp() {
               </span>
               <button onClick={() => setPricingOpen(true)}>Configurar</button>
             </article>
-            <SectionTitle title="Pedidos de encaixe" />
+            <SectionTitle title="Visitas em encaixe/reserva" />
+            <div className={styles.list}>
+              {waitlistedAppointments.length ? waitlistedAppointments.map((item) => (
+                <AppointmentCard appointment={item} key={item.id} onClick={() => openAppointment(item)} />
+              )) : <EmptyState text="Nenhuma visita em encaixe/reserva." />}
+            </div>
+            <SectionTitle title="Pedidos de encaixe antigos" />
             <div className={styles.list}>
               {realWaitlistRequests.length ? realWaitlistRequests.map((item) => (
                 <WaitlistCard
@@ -2748,20 +2986,44 @@ export function BichanoApp() {
 
         {page === "payments" && (
           <Page title="Controle de pagamentos" intro="O pagamento acontece fora do app. Registre aqui quando o valor combinado for recebido.">
+            <div className={styles.financeSummaryGrid}>
+              <Stat label="Total recebido" value={formatMoney(adminMetrics.receivedCents)} note={`${adminMetrics.paidCount} visita${adminMetrics.paidCount === 1 ? "" : "s"} paga${adminMetrics.paidCount === 1 ? "" : "s"}`} />
+              <Stat label="Total pendente" value={formatMoney(adminMetrics.pendingCents)} note={`${adminMetrics.pendingCount} visita${adminMetrics.pendingCount === 1 ? "" : "s"} em aberto`} />
+              <Stat label="Concluidas" value={String(adminMetrics.completedCount)} note="Pagas ou pendentes" />
+              <Stat label="Vencidas" value={String(adminMetrics.overdueCount)} note={formatMoney(adminMetrics.overdueCents)} />
+            </div>
+            <SectionTitle title="Pendentes de pagamento" />
             <div className={styles.list}>
-              {realPayments.length ? realPayments.map((payment) => (
+              {pendingPayments.length ? pendingPayments.map((payment) => (
                 <article className={styles.paymentCard} key={payment.id}>
                   <span className={styles.paymentIcon}>R$</span>
                   <span>
                     <strong>{payment.tutor} • {formatMoney(payment.amountCents)}</strong>
-                    <small>{payment.service} de {payment.pet}</small>
-                    <small>Data combinada: {formatDate(payment.dueDate)} • {payment.status === "overdue" ? "Em atraso" : "Aguardando confirmação"}</small>
+                    <small>Babá: {payment.sitter}</small>
+                    <small>{payment.service} de {payment.pet} • visita em {formatDate(payment.visitDate)}</small>
+                    <small>{paymentStatusLabel(payment.status)} • {daysOpen(payment.visitDate)} dia{daysOpen(payment.visitDate) === 1 ? "" : "s"} em aberto</small>
+                    {payment.notes && <small>Obs. financeira: {payment.notes}</small>}
                   </span>
                   <button disabled={paymentSavingId === payment.id} onClick={() => markPaymentReceived(payment.id)}>
                     {paymentSavingId === payment.id ? "Salvando..." : "Recebido"}
                   </button>
                 </article>
               )) : <EmptyState text="Nenhum pagamento pendente." />}
+            </div>
+            <SectionTitle title="Pagamentos recebidos" />
+            <div className={styles.list}>
+              {paidPayments.length ? paidPayments.map((payment) => (
+                <article className={styles.paymentCard} key={payment.id}>
+                  <span className={styles.paymentIcon}>OK</span>
+                  <span>
+                    <strong>{payment.tutor} • {formatMoney(payment.amountCents)}</strong>
+                    <small>Babá: {payment.sitter}</small>
+                    <small>{payment.service} de {payment.pet} • visita em {formatDate(payment.visitDate)}</small>
+                    <small>{paymentStatusLabel(payment.status)} • pago em {payment.paidAt ? new Date(payment.paidAt).toLocaleDateString("pt-BR") : "data nao informada"}</small>
+                    {payment.notes && <small>Obs. financeira: {payment.notes}</small>}
+                  </span>
+                </article>
+              )) : <EmptyState text="Nenhum pagamento recebido registrado." />}
             </div>
           </Page>
         )}
@@ -2842,7 +3104,6 @@ export function BichanoApp() {
             <div className={styles.profileCard}>
               <button onClick={() => { setProfileError(""); setProfilePanel("personal"); }}>Dados pessoais<span>⬺</span></button>
               <button onClick={() => { setProfileError(""); setProfilePanel("address"); }}>Endereços<span>⬺</span></button>
-              <button onClick={() => setProfilePanel("notifications")}>Notificações<span>⬺</span></button>
               <button onClick={() => void openSecurityPanel()}>Segurança da conta<span>⬺</span></button>
               <button onClick={() => setProfilePanel("help")}>Ajuda<span>⬺</span></button>
             </div>
@@ -2953,7 +3214,7 @@ export function BichanoApp() {
           {bookingWaitlistAvailable && (
             <article className={styles.waitlistPrompt}>
               <strong>Entrar na lista de espera?</strong>
-              <small>A administradora recebe o pedido e pode confirmar um encaixe se surgir vaga ou se ela abrir um horário extra.</small>
+              <small>A administradora recebe o pedido e pode confirmar um encaixe conforme a rota do dia.</small>
               <button className={styles.secondaryButton} disabled={actionBusy} onClick={() => void requestAppointment(true)}>
                 Pedir encaixe para este dia
               </button>
@@ -2980,7 +3241,7 @@ export function BichanoApp() {
             <label className={styles.field}><span>Idade aproximada</span><input value={petAge} onChange={(event) => setPetAge(event.target.value)} placeholder="Ex.: 3 anos" /></label>
           </div>
           <label className={styles.field}><span>Raça</span><input value={petBreed} onChange={(event) => setPetBreed(event.target.value)} /></label>
-          <label className={styles.field}><span>Medicação e horários</span><textarea rows={3} value={petMedication} onChange={(event) => setPetMedication(event.target.value)} /></label>
+          <label className={styles.field}><span>Medicação e orientações de uso</span><textarea rows={3} value={petMedication} onChange={(event) => setPetMedication(event.target.value)} /></label>
           <label className={styles.field}><span>Foto (até 5 MB)</span><input type="file" accept="image/*" onChange={(event) => setPetPhoto(event.target.files?.[0] || null)} /></label>
           <button className={styles.primaryButton} disabled={actionBusy} onClick={() => void savePet()}>{actionBusy ? "Salvando..." : editingPet ? "Salvar alterações" : "Cadastrar bichano"}</button>
         </Modal>
@@ -3024,14 +3285,14 @@ export function BichanoApp() {
       )}
 
       {appointmentOpen && (
-        <Modal title={`${appointmentOpen.pet} • ${appointmentOpen.service}`} description={`${appointmentOpen.date}${isRouteAppointment(appointmentOpen) ? "" : `, às ${appointmentOpen.time}`} • ${appointmentOpen.address}`} onClose={() => setAppointmentOpen(null)}>
-          {role === "client" && (appointmentOpen.rawStatus === "requested" || appointmentOpen.rawStatus === "confirmed") && (
+        <Modal title={`${appointmentOpen.pet} • ${appointmentOpen.service}`} description={`${appointmentOpen.date}${role === "client" || isRouteAppointment(appointmentOpen) ? "" : `, às ${appointmentOpen.time}`} • ${appointmentOpen.address}`} onClose={() => setAppointmentOpen(null)}>
+          {role === "client" && (appointmentOpen.rawStatus === "requested" || appointmentOpen.rawStatus === "confirmed" || appointmentOpen.rawStatus === "waitlisted") && (
             <button className={styles.secondaryButton} disabled={actionBusy} onClick={() => setCancelAppointmentOpen(appointmentOpen)}>
               {actionBusy ? "Cancelando..." : "Desistir da visita"}
             </button>
           )}
           {role === "admin" && appointmentOpen.rawStatus !== "requested" && <>
-            <label className={styles.field}><span>Status</span><select value={managedStatus} onChange={(event) => setManagedStatus(event.target.value)}><option value="confirmed">Confirmada</option><option value="in_progress">Em andamento</option><option value="completed">Concluída</option><option value="cancelled">Cancelada</option></select></label>
+            <label className={styles.field}><span>Status</span><select value={managedStatus === "completed" ? "in_progress" : managedStatus} onChange={(event) => setManagedStatus(event.target.value)}><option value="confirmed">Confirmada</option><option value="waitlisted">Encaixe/reserva</option><option value="in_progress">Em andamento</option><option value="cancelled">Cancelada</option></select></label>
             <label className={styles.field}><span>Responsável</span><select value={managedStaffId} onChange={(event) => setManagedStaffId(event.target.value)}><option value="">Não atribuída</option>{realStaff.filter((item) => item.active).map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
             <label className={styles.field}><span>Data e horário</span><input type="datetime-local" value={managedStartsAt} onChange={(event) => setManagedStartsAt(event.target.value)} /></label>
             <button className={styles.primaryButton} disabled={actionBusy} onClick={() => void manageAppointment()}>{actionBusy ? "Salvando..." : "Salvar agendamento"}</button>
@@ -3052,12 +3313,17 @@ export function BichanoApp() {
           {(role === "staff" || role === "admin") && appointmentOpen.rawStatus !== "cancelled" && <>
             <div className={styles.formDivider}>Relatório da visita</div>
             <label className={styles.field}><span>Resumo para o tutor</span><textarea rows={4} value={visitNote} onChange={(event) => setVisitNote(event.target.value)} placeholder="Alimentação, água, caixa de areia, comportamento e medicação" /></label>
+            {role === "admin" && <>
+              <label className={styles.field}><span>Status financeiro ao concluir</span><select value={adminCompletionPaymentStatus} onChange={(event) => setAdminCompletionPaymentStatus(event.target.value as "pending" | "paid")}><option value="pending">Concluida - aguardando pagamento</option><option value="paid">Concluida - pagamento recebido</option></select></label>
+              <label className={styles.field}><span>Observacoes financeiras</span><textarea rows={2} value={adminFinancialNotes} onChange={(event) => setAdminFinancialNotes(event.target.value)} placeholder="Forma de pagamento, combinados ou detalhes internos" /></label>
+            </>}
+            {visitActionError && <p className={styles.formError}>{visitActionError}</p>}
             <div className={styles.formActions}>
               {role === "staff" ? (
                 <button className={styles.primaryButton} disabled={actionBusy} onClick={() => void updateAssignedVisit()}>{actionBusy ? "Salvando..." : "Salvar visita"}</button>
               ) : <>
                 <button className={styles.secondaryButton} disabled={actionBusy} onClick={() => void recordVisit(false)}>Salvar relatório</button>
-                <button className={styles.primaryButton} disabled={actionBusy} onClick={() => void recordVisit(true)}>Concluir visita</button>
+                <button className={styles.primaryButton} disabled={actionBusy} onClick={() => void recordVisit(true, adminCompletionPaymentStatus)}>Concluir visita</button>
               </>}
             </div>
           </>}
@@ -3245,7 +3511,7 @@ function SectionTitle({ title, action, onClick }: { title: string; action?: stri
 function AppointmentCard({ appointment, onClick }: { appointment: AppointmentView; onClick?: () => void }) {
   return (
     <button className={styles.appointmentCard} onClick={onClick} type="button">
-      <span className={styles.time}>{appointmentTimeLabel(appointment)}</span>
+      <span className={styles.time}>{appointmentTimeLabel()}</span>
       <span>
         <strong>{appointment.pet} • {appointment.service}</strong>
         <small>{appointment.date} • Tutor: {appointment.tutor}</small>
@@ -3633,7 +3899,7 @@ function ClientIntake({
             <YesNoField label="Possui algum problema de saúde?" value={data.hasHealthCondition} onChange={(value) => update("hasHealthCondition", value)} />
             {data.hasHealthCondition && <FormInput label="Qual?" value={data.healthDetails} onChange={(value) => update("healthDetails", value)} />}
             <YesNoField label="Faz uso de medicamentos?" value={data.usesMedication} onChange={(value) => update("usesMedication", value)} />
-            {data.usesMedication && <FormInput label="Quais e em que horários?" value={data.medicationDetails} onChange={(value) => update("medicationDetails", value)} />}
+            {data.usesMedication && <FormInput label="Quais e como devem ser administrados?" value={data.medicationDetails} onChange={(value) => update("medicationDetails", value)} />}
             <YesNoField label="Possui alguma alergia?" value={data.hasAllergy} onChange={(value) => update("hasAllergy", value)} />
             {data.hasAllergy && <FormInput label="Qual?" value={data.allergyDetails} onChange={(value) => update("allergyDetails", value)} />}
             <div className={styles.formDivider}>Contato em caso de emergência</div>

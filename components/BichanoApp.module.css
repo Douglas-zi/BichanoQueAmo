@@ -216,6 +216,8 @@
 .financeCard small, .financeCard strong { display: block; }
 .financeCard small { color: #6f5a16; font-size: 9px; text-transform: uppercase; }
 .financeCard strong { margin-top: 5px; }
+.financeSummaryGrid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 20px; }
+.financeSummaryGrid .stat { margin: 0; }
 .pricingCard { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 12px; padding: 16px; border: 1px solid #e9d5c4; border-radius: 22px; background: linear-gradient(135deg, #fff8ed, #fff); }
 .pricingCard > span { display: grid; gap: 3px; }
 .pricingCard small { color: var(--muted); font-size: 9px; font-weight: 800; text-transform: uppercase; }

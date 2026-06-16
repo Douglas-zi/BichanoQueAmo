@@ -5,11 +5,8 @@ import test from "node:test";
 const setupPath = new URL("../supabase/reset_and_setup.sql", import.meta.url);
 const migrationsPath = new URL("../supabase/migrations/", import.meta.url);
 const appPath = new URL("../components/BichanoApp.tsx", import.meta.url);
-const manageAppointmentPatchPath = new URL("../supabase/patches/manage_appointment.sql", import.meta.url);
-const reviewAppointmentRequestPatchPath = new URL("../supabase/patches/review_appointment_request.sql", import.meta.url);
-const paymentStatusCastPatchPath = new URL("../supabase/patches/sync_appointment_payment_status_cast.sql", import.meta.url);
-const adminRegisterStaffPatchPath = new URL("../supabase/patches/admin_register_staff.sql", import.meta.url);
-const staffUpdateVisitPatchPath = new URL("../supabase/patches/staff_update_assigned_visit.sql", import.meta.url);
+const readmePath = new URL("../README.md", import.meta.url);
+const supabaseReadmePath = new URL("../supabase/README.md", import.meta.url);
 
 test("Supabase has one consolidated setup and no historical migrations", async () => {
   const entries = await readdir(migrationsPath).catch(() => []);
@@ -81,9 +78,6 @@ test("client list reads the canonical profiles table", async () => {
 
 test("interactive workflows are connected", async () => {
   const source = await readFile(appPath, "utf8");
-  const manageAppointmentPatch = await readFile(manageAppointmentPatchPath, "utf8");
-  const reviewAppointmentRequestPatch = await readFile(reviewAppointmentRequestPatchPath, "utf8");
-  const paymentStatusCastPatch = await readFile(paymentStatusCastPatchPath, "utf8");
   const setupSql = await readFile(setupPath, "utf8");
   assert.match(source, /supabase\.rpc\("admin_register_staff"/);
   assert.match(source, /supabase\.rpc\("request_appointment"/);
@@ -95,21 +89,43 @@ test("interactive workflows are connected", async () => {
   assert.match(source, />Revisar</);
   assert.match(source, /Aceitar atendimento/);
   assert.match(source, />Recusar</);
-  assert.match(manageAppointmentPatch, /create or replace function public\.manage_appointment/);
-  assert.match(manageAppointmentPatch, /notify pgrst, 'reload schema'/);
-  assert.match(reviewAppointmentRequestPatch, /create or replace function public\.review_appointment_request/);
-  assert.match(reviewAppointmentRequestPatch, /Solicitacao recusada/);
-  assert.match(reviewAppointmentRequestPatch, /role in \('staff', 'admin'\)/);
+  assert.match(setupSql, /create function public\.manage_appointment/);
+  assert.match(setupSql, /create function public\.review_appointment_request/);
+  assert.match(setupSql, /Solicitacao recusada/);
+  assert.match(setupSql, /role in \('staff', 'admin'\)/);
   assert.match(setupSql, /'pending'::public\.payment_status/);
-  assert.match(paymentStatusCastPatch, /create or replace function public\.sync_appointment_payment/);
-  assert.match(paymentStatusCastPatch, /add column if not exists visit_count/);
-  assert.match(paymentStatusCastPatch, /add column if not exists extra_pet_count/);
-  assert.match(paymentStatusCastPatch, /'pending'::public\.payment_status/);
+  assert.match(setupSql, /create function public\.sync_appointment_payment/);
+  assert.match(setupSql, /visit_count integer not null default 1/);
+  assert.match(setupSql, /extra_pet_count integer not null default 0/);
+  assert.match(setupSql, /completed_at timestamptz/);
   assert.match(source, /requested_visit_count: bookingVisitCount/);
   assert.match(source, /requested_extra_pet_count: Math\.max\(bookingPetIds\.length - 1, 0\)/);
   assert.doesNotMatch(source, /for \(const selectedPetId of bookingPetIds\)/);
   assert.doesNotMatch(source, /bookingPetIds\.flatMap\(\(selectedPetId\)/);
   assert.match(source, /supabase\.rpc\("record_visit"/);
+  assert.match(source, /trimmedVisitNote \|\| "Visita concluida pela administracao\."/);
+  assert.match(source, /function markAppointmentPaymentReceived/);
+  assert.match(source, /\.eq\("appointment_id", appointmentId\)/);
+  assert.match(source, /Status financeiro ao concluir/);
+  assert.match(source, /admin_payment_status/);
+  assert.match(source, /financial_note/);
+  assert.match(source, /function isMissingRpcSignature/);
+  assert.match(source, /function isAppointmentStatusCastError/);
+  assert.match(source, /function saveVisitRecordDirect/);
+  assert.match(source, /function saveVisitRecord/);
+  assert.match(source, /syncCompletedVisitPayment/);
+  assert.match(source, /could not find/);
+  assert.match(source, /amount_cents: 1/);
+  assert.match(source, /Concluida - aguardando pagamento/);
+  assert.match(source, /Concluida - pagamento recebido/);
+  assert.match(source, /recordVisit\(true, adminCompletionPaymentStatus\)/);
+  assert.match(setupSql, /admin_payment_status public\.payment_status default null/);
+  assert.match(setupSql, /Defina se a visita concluida ficou pendente de pagamento ou foi paga/);
+  assert.match(setupSql, /payment_due/);
+  assert.match(setupSql, /interval '3 days'/);
+  assert.match(setupSql, /amount := greatest\(coalesce\(amount, 1\), 1\)/);
+  assert.match(setupSql, /'completed'::public\.appointment_status/);
+  assert.match(setupSql, /'in_progress'::public\.appointment_status/);
   assert.match(source, /supabase\.rpc\("staff_update_assigned_visit"/);
   assert.match(source, /from\("pets"\)\.update\(petPayload\)/);
   assert.match(source, /from\("pets"\)\.update\(\{ active: false \}\)/);
@@ -120,20 +136,37 @@ test("interactive workflows are connected", async () => {
 test("staff can update only assigned visits without admin privileges", async () => {
   const source = await readFile(appPath, "utf8");
   const setupSql = await readFile(setupPath, "utf8");
-  const patchSql = await readFile(staffUpdateVisitPatchPath, "utf8");
   assert.match(source, /Status da visita/);
   assert.match(source, /function updateAssignedVisit/);
   assert.match(source, /requested_status: managedStatus/);
   assert.match(setupSql, /create function public\.staff_update_assigned_visit/);
-  assert.match(patchSql, /public\.staff_is_assigned_to_appointment\(target_appointment_id\)/);
-  assert.match(patchSql, /requested_status not in \('confirmed', 'in_progress', 'completed'\)/);
-  assert.doesNotMatch(patchSql, /public\.is_admin\(\)/);
+  assert.match(setupSql, /public\.staff_is_assigned_to_appointment\(target_appointment_id\)/);
+  assert.match(setupSql, /requested_status not in \('confirmed', 'in_progress', 'completed'\)/);
+  assert.doesNotMatch(
+    setupSql.match(/create function public\.staff_update_assigned_visit[\s\S]*?\$\$;/)?.[0] || "",
+    /public\.is_admin\(\)/,
+  );
+});
+
+test("financial dashboard separates pending and received payments", async () => {
+  const source = await readFile(appPath, "utf8");
+  const setupSql = await readFile(setupPath, "utf8");
+  const patchSql = await readFile(new URL("../supabase/patches/financial_visit_control.sql", import.meta.url), "utf8");
+  assert.match(source, /Pendentes de pagamento/);
+  assert.match(source, /Pagamentos recebidos/);
+  assert.match(source, /Total recebido/);
+  assert.match(source, /Total pendente/);
+  assert.match(source, /em aberto/);
+  assert.match(source, /\.in\("status", \["pending", "overdue", "paid"\]\)/);
+  assert.match(setupSql, /Conclua a visita pelo fechamento financeiro/);
+  assert.match(patchSql, /financial control for completed visits/);
+  assert.match(patchSql, /drop function if exists public\.record_visit\(uuid, text, boolean, public\.payment_status, text\)/);
+  assert.match(patchSql, /notify pgrst, 'reload schema'/);
 });
 
 test("staff registration promotes an existing signup without Edge Functions", async () => {
   const appSource = await readFile(appPath, "utf8");
   const setupSql = await readFile(setupPath, "utf8");
-  const patchSql = await readFile(adminRegisterStaffPatchPath, "utf8");
   assert.match(appSource, /Cadastrar babá/);
   assert.match(appSource, /supabase\.rpc\("admin_register_staff"/);
   assert.doesNotMatch(appSource, /functions\/v1\/invite-staff/);
@@ -141,7 +174,19 @@ test("staff registration promotes an existing signup without Edge Functions", as
   assert.match(appSource, /staffFormError/);
   assert.match(appSource, /styles\.staffRegistration/);
   assert.match(setupSql, /create function public\.admin_register_staff/);
-  assert.match(patchSql, /create or replace function public\.admin_register_staff/);
-  assert.match(patchSql, /role = 'staff'/);
-  assert.match(patchSql, /notify pgrst, 'reload schema'/);
+  assert.match(setupSql, /role = 'staff'/);
+  assert.match(setupSql, /notify pgrst, 'reload schema'/);
+});
+
+test("documentation points to the consolidated Supabase setup", async () => {
+  const readme = await readFile(readmePath, "utf8");
+  const supabaseReadme = await readFile(supabaseReadmePath, "utf8");
+  assert.match(readme, /reset_and_setup\.sql/);
+  assert.match(readme, /fonte canônica/);
+  assert.match(readme, /patches\/` são histórico/);
+  assert.match(readme, /admin_register_staff/);
+  assert.doesNotMatch(readme, /functions deploy invite-staff/);
+  assert.match(supabaseReadme, /canonical backend definition/);
+  assert.match(supabaseReadme, /Legacy SQL Patches/);
+  assert.match(supabaseReadme, /Legacy Edge Function/);
 });
