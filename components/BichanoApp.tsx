@@ -455,7 +455,6 @@ export function BichanoApp() {
   const [signupError, setSignupError] = useState("");
   const [signupSuccess, setSignupSuccess] = useState("");
   const [bookingOpen, setBookingOpen] = useState(false);
-  const [inviteOpen, setInviteOpen] = useState(false);
   const [petOpen, setPetOpen] = useState(false);
   const [appointmentOpen, setAppointmentOpen] = useState<AppointmentView | null>(null);
   const [cancelAppointmentOpen, setCancelAppointmentOpen] = useState<AppointmentView | null>(null);
@@ -503,7 +502,6 @@ export function BichanoApp() {
   const [clientDetail, setClientDetail] = useState<ClientDetail | null>(null);
   const [clientDetailLoading, setClientDetailLoading] = useState(false);
   const [clientDetailError, setClientDetailError] = useState("");
-  const [legacyClientEmail, setLegacyClientEmail] = useState("");
   const [pricingOpen, setPricingOpen] = useState(false);
   const [standardVisitPrice, setStandardVisitPrice] = useState(supabase ? "" : "55,00");
   const [pricingSaving, setPricingSaving] = useState(false);
@@ -531,6 +529,7 @@ export function BichanoApp() {
   const [bookingWaitlistAvailable, setBookingWaitlistAvailable] = useState(false);
   const [inviteName, setInviteName] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
+  const [staffFormError, setStaffFormError] = useState("");
   const [petName, setPetName] = useState("");
   const [petSex, setPetSex] = useState("unknown");
   const [petBreed, setPetBreed] = useState("");
@@ -1065,7 +1064,7 @@ export function BichanoApp() {
         name: client.full_name?.trim() || client.email?.split("@")[0] || "Nome não informado",
         email: client.email || "E-mail não informado",
         phone: client.phone || "Telefone não informado",
-        address: client.address || "EndereÃ§o nÃ£o informado",
+        address: client.address || "Endereço não informado",
         petNames: petNamesByClient.get(client.id) || [],
         active: client.active,
         onboardingCompleted: Boolean(client.onboarding_completed_at),
@@ -1520,7 +1519,9 @@ export function BichanoApp() {
       notify("Pagamento marcado como recebido.");
       void loadRealData("admin");
     } catch (error) {
-      notify(error instanceof Error ? error.message : "Não foi possível atualizar o pagamento.");
+      const message = errorMessage(error, "Não foi possível revisar o cadastro.");
+      setClientDetailError(message);
+      notify(message);
     } finally {
       setPaymentSavingId("");
     }
@@ -1528,27 +1529,51 @@ export function BichanoApp() {
 
   function clearVisitHistory() {
     if (!visibleVisitHistory.length) return;
-    const confirmed = window.confirm("Limpar o historico exibido? As visitas antigas serao preservadas nos registros do app.");
+    const confirmed = window.confirm("Limpar o histórico exibido? As visitas antigas serão preservadas nos registros do app.");
     if (!confirmed) return;
 
     setClearedHistoryIds((current) => [...new Set([...current, ...visibleVisitHistory.map((appointment) => appointment.id)])]);
-    notify("Historico limpo.");
+    notify("Histórico limpo.");
   }
 
   async function reviewClient(clientId: string, action: "approve" | "delete") {
-    if (!supabase || role !== "admin") return;
+    if (!supabase) return;
     setClientSavingId(clientId);
+    setClientDetailError("");
     try {
-      const { data, error } = await supabase.rpc("admin_review_client_v2", {
-        target_user_id: clientId,
-        review_action: action,
-      });
-      if (error) throw error;
+      let data: string | null = null;
+
+      if (action === "approve") {
+        const { error: approveError } = await supabase.rpc("admin_approve_client_v3", {
+          target_user_id: clientId,
+        });
+
+        if (approveError) {
+          const missingApproveRpc = ["42883", "PGRST202"].includes(approveError.code || "");
+          if (!missingApproveRpc) throw approveError;
+
+          const { data: legacyData, error: legacyError } = await supabase.rpc("admin_review_client_v2", {
+            target_user_id: clientId,
+            review_action: action,
+          });
+          if (legacyError) throw legacyError;
+          data = legacyData;
+        }
+      } else {
+        const { error } = await supabase.rpc("admin_review_client_v2", {
+          target_user_id: clientId,
+          review_action: action,
+        });
+        if (error) throw error;
+      }
 
       if (action === "approve") {
         setRealClients((current) => current.map((client) => (
           client.id === clientId ? { ...client, active: true, welcomeCode: data || client.welcomeCode } : client
         )));
+        setClientDetail((current) => (
+          current?.id === clientId ? { ...current, active: true } : current
+        ));
         notify(
           data
             ? `Cliente aceito. Código de boas-vindas: ${data}`
@@ -1561,38 +1586,11 @@ export function BichanoApp() {
       }
       void loadRealData("admin");
     } catch (error) {
-      notify(error instanceof Error ? error.message : "Não foi possível revisar o cadastro.");
+      const message = errorMessage(error, "Não foi possível revisar o cadastro.");
+      setClientDetailError(message);
+      notify(message);
     } finally {
       setClientSavingId("");
-    }
-  }
-
-  async function recoverLegacyClient() {
-    const requestedEmail = legacyClientEmail.trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(requestedEmail)) {
-      setClientListError("Informe o e-mail usado no cadastro antigo.");
-      return;
-    }
-
-    setClientListLoading(true);
-    setClientListError("");
-    try {
-      const { error } = await supabase?.rpc("admin_recover_client_v3", {
-        requested_email: requestedEmail,
-      }) || { error: new Error("Supabase indisponível.") };
-      if (error) throw error;
-      setLegacyClientEmail("");
-      await loadAdminClients();
-      notify("Cadastro antigo recuperado. Agora ele pode ser aprovado.");
-    } catch (error) {
-      const message = errorMessage(error, "Não foi possível recuperar o cadastro.");
-      setClientListError(
-        message.includes("admin_recover_client_v3") || (error && typeof error === "object" && "code" in error && error.code === "PGRST202")
-          ? "O backend consolidado não está instalado. Execute supabase/reset_and_setup.sql no SQL Editor."
-          : message,
-      );
-    } finally {
-      setClientListLoading(false);
     }
   }
 
@@ -1689,27 +1687,29 @@ export function BichanoApp() {
     }
   }
 
-  async function inviteStaff() {
+  async function registerStaff() {
+    setStaffFormError("");
     if (!inviteName.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(inviteEmail.trim())) {
-      notify("Informe o nome e um e-mail válido.");
+      setStaffFormError("Informe o nome e um e-mail válido.");
       return;
     }
     setActionBusy(true);
     try {
       if (supabase) {
-        const { data, error } = await supabase.functions.invoke("invite-staff", {
-          body: { fullName: inviteName.trim(), email: inviteEmail.trim().toLowerCase() },
+        const { error } = await supabase.rpc("admin_register_staff", {
+          requested_email: inviteEmail.trim().toLowerCase(),
+          requested_full_name: inviteName.trim(),
         });
-        if (error) throw new Error(await functionErrorMessage(error, "Não foi possível enviar o convite."));
-        if (data?.error) throw new Error(data.error);
+        if (error) throw error;
         await loadRealData("admin");
       }
       setInviteName("");
       setInviteEmail("");
-      setInviteOpen(false);
-      notify("Convite enviado.");
+      notify("Babá cadastrada.");
     } catch (error) {
-      notify(error instanceof Error ? error.message : "Não foi possível enviar o convite.");
+      const message = error instanceof Error ? error.message : "Não foi possível cadastrar a babá.";
+      setStaffFormError(message);
+      notify(message);
     } finally {
       setActionBusy(false);
     }
@@ -1977,6 +1977,26 @@ export function BichanoApp() {
     }
   }
 
+  async function updateAssignedVisit() {
+    if (!supabase || !appointmentOpen) return;
+    setActionBusy(true);
+    try {
+      const { error } = await supabase.rpc("staff_update_assigned_visit", {
+        target_appointment_id: appointmentOpen.id,
+        requested_status: managedStatus,
+        visit_note: visitNote.trim() || null,
+      });
+      if (error) throw error;
+      await loadRealData(role);
+      setAppointmentOpen(null);
+      notify("Visita atualizada.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Não foi possível atualizar a visita.");
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
   async function saveNotificationPreferences() {
     setActionBusy(true);
     try {
@@ -2070,22 +2090,6 @@ export function BichanoApp() {
       return error.message;
     }
     return fallback;
-  }
-
-  async function functionErrorMessage(error: unknown, fallback: string) {
-    if (error && typeof error === "object" && "context" in error && error.context instanceof Response) {
-      try {
-        const body = await error.context.json() as { error?: unknown };
-        if (typeof body.error === "string" && body.error.trim()) return body.error;
-      } catch {
-        // The response may not contain JSON when the function is unreachable.
-      }
-    }
-    const message = databaseErrorMessage(error, fallback);
-    if (message.toLowerCase().includes("failed to send a request to the edge function")) {
-      return "Não foi possível conectar à Edge Function. Publique invite-staff e confira ALLOWED_ORIGINS e SUPABASE_SERVICE_ROLE_KEY no Supabase.";
-    }
-    return message;
   }
 
   async function saveStandardVisitPrice() {
@@ -2648,7 +2652,7 @@ export function BichanoApp() {
                       <button disabled={actionBusy} onClick={() => openPetForm(pet)}>Editar</button>
                       <button className={styles.deletePet} disabled={actionBusy} onClick={() => void deletePet(pet)}>Excluir</button>
                     </div>
-                  ) : <b>›</b>}
+                  ) : <b>⬺</b>}
                 </article>
               ))}
               {supabase && visiblePets.length === 0 && <EmptyState text="Nenhum bichano cadastrado." />}
@@ -2773,15 +2777,6 @@ export function BichanoApp() {
                 {clientListLoading ? "Consultando..." : "Atualizar"}
               </button>
             </div>
-            <div className={styles.legacyClientRecovery}>
-              <label className={styles.field}>
-                <span>Cadastro antigo não apareceu?</span>
-                <input type="email" value={legacyClientEmail} onChange={(event) => setLegacyClientEmail(event.target.value)} placeholder="email usado no cadastro" />
-              </label>
-              <button disabled={clientListLoading || !legacyClientEmail.trim()} onClick={() => void recoverLegacyClient()}>
-                Recuperar cadastro
-              </button>
-            </div>
             {clientListLoading && <EmptyState text="Atualizando clientes..." />}
             {clientListError && <p className={styles.formError}>{clientListError}</p>}
             <div className={styles.list}>
@@ -2789,9 +2784,7 @@ export function BichanoApp() {
                 <ClientCard
                   key={client.id}
                   client={client}
-                  saving={clientSavingId === client.id}
                   onOpen={() => void openClientDetail(client)}
-                  onApprove={() => reviewClient(client.id, "approve")}
                 />
               )) : !clientListLoading && !clientListError && <EmptyState text="O Supabase Auth retornou zero clientes. Se o cadastro acabou de ser feito, confirme se ele aparece em Authentication > Users no mesmo projeto." />}
             </div>
@@ -2802,7 +2795,7 @@ export function BichanoApp() {
           <Page title="Histórico de visitas" intro="Visitas concluídas e canceladas ficam aqui, fora do painel atual.">
             {visibleVisitHistory.length > 0 && (
               <button className={styles.clearHistoryButton} onClick={clearVisitHistory} type="button">
-                Limpar historico
+                Limpar histórico
               </button>
             )}
             <div className={styles.list}>{visibleVisitHistory.length ? visibleVisitHistory.map((item) => <AppointmentCard appointment={item} key={item.id} onClick={() => openAppointment(item)} />) : <EmptyState text="Nenhuma visita no histórico." />}</div>
@@ -2820,7 +2813,14 @@ export function BichanoApp() {
                   <StaffCard name="Bárbara Alves" detail="3 visitas atribuídas" active onAction={() => notify("Acesso demonstrativo revogado.")} />
                   <StaffCard name="Letícia Souza" detail="Nenhuma visita atribuída" onAction={() => notify("Acesso demonstrativo concedido.")} />
                 </>}
-              <button className={styles.dashedButton} onClick={() => setInviteOpen(true)}>+ Convidar nova babá</button>
+              <article className={styles.staffRegistration}>
+                <strong>Cadastrar babá</strong>
+                <small>Primeiro ela cria uma conta pelo botão Cadastrar. Depois informe aqui o mesmo e-mail para liberar o acesso de babá.</small>
+                <label className={styles.field}><span>Nome completo</span><input value={inviteName} onChange={(event) => setInviteName(event.target.value)} placeholder="Nome da babá" /></label>
+                <label className={styles.field}><span>E-mail</span><input type="email" value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="baba@email.com" /></label>
+                {staffFormError && <p className={styles.formError}>{staffFormError}</p>}
+                <button className={styles.primaryButton} disabled={actionBusy} onClick={() => void registerStaff()}>{actionBusy ? "Cadastrando..." : "Cadastrar babá"}</button>
+              </article>
             </div>
           </Page>
         )}
@@ -2840,11 +2840,11 @@ export function BichanoApp() {
         {page === "profile" && (
           <Page title="Minha conta" intro="Seus dados, preferências e configurações.">
             <div className={styles.profileCard}>
-              <button onClick={() => { setProfileError(""); setProfilePanel("personal"); }}>Dados pessoais<span>›</span></button>
-              <button onClick={() => { setProfileError(""); setProfilePanel("address"); }}>Endereços<span>›</span></button>
-              <button onClick={() => setProfilePanel("notifications")}>Notificações<span>›</span></button>
-              <button onClick={() => void openSecurityPanel()}>Segurança da conta<span>›</span></button>
-              <button onClick={() => setProfilePanel("help")}>Ajuda<span>›</span></button>
+              <button onClick={() => { setProfileError(""); setProfilePanel("personal"); }}>Dados pessoais<span>⬺</span></button>
+              <button onClick={() => { setProfileError(""); setProfilePanel("address"); }}>Endereços<span>⬺</span></button>
+              <button onClick={() => setProfilePanel("notifications")}>Notificações<span>⬺</span></button>
+              <button onClick={() => void openSecurityPanel()}>Segurança da conta<span>⬺</span></button>
+              <button onClick={() => setProfilePanel("help")}>Ajuda<span>⬺</span></button>
             </div>
             <button className={`${styles.primaryButton} ${styles.logout}`} onClick={logout}>Sair da conta</button>
           </Page>
@@ -2965,14 +2965,6 @@ export function BichanoApp() {
         </Modal>
       )}
 
-      {inviteOpen && (
-        <Modal title="Convidar babá" description="Ela receberá um e-mail para criar a senha." onClose={() => setInviteOpen(false)}>
-          <label className={styles.field}><span>Nome completo</span><input value={inviteName} onChange={(event) => setInviteName(event.target.value)} placeholder="Nome da babá" /></label>
-          <label className={styles.field}><span>E-mail</span><input type="email" value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="baba@email.com" /></label>
-          <button className={styles.primaryButton} disabled={actionBusy} onClick={() => void inviteStaff()}>{actionBusy ? "Enviando..." : "Enviar convite"}</button>
-        </Modal>
-      )}
-
       {petOpen && (
         <Modal
           title={editingPet ? "Editar bichano" : "Adicionar bichano"}
@@ -3008,6 +3000,15 @@ export function BichanoApp() {
           {clientDetailError && <p className={styles.formError}>{clientDetailError}</p>}
           {clientDetail && <>
             <ClientDetailPanel detail={clientDetail} />
+            {!clientDetail.active && (
+              <button
+                className={styles.approveClientDetail}
+                disabled={clientSavingId === clientDetail.id}
+                onClick={() => void reviewClient(clientDetail.id, "approve")}
+              >
+                {clientSavingId === clientDetail.id ? "Aceitando..." : "Aceitar cliente"}
+              </button>
+            )}
             <button
               className={styles.deleteClientDetail}
               disabled={clientSavingId === clientDetail.id}
@@ -3035,6 +3036,9 @@ export function BichanoApp() {
             <label className={styles.field}><span>Data e horário</span><input type="datetime-local" value={managedStartsAt} onChange={(event) => setManagedStartsAt(event.target.value)} /></label>
             <button className={styles.primaryButton} disabled={actionBusy} onClick={() => void manageAppointment()}>{actionBusy ? "Salvando..." : "Salvar agendamento"}</button>
           </>}
+          {role === "staff" && appointmentOpen.rawStatus !== "cancelled" && appointmentOpen.rawStatus !== "requested" && (
+            <label className={styles.field}><span>Status da visita</span><select value={managedStatus} onChange={(event) => setManagedStatus(event.target.value)}><option value="confirmed">Confirmada</option><option value="in_progress">Em andamento</option><option value="completed">Concluída</option></select></label>
+          )}
           {role === "admin" && appointmentOpen.rawStatus === "requested" && (
             <>
               <p className={styles.formHint}>Revise a solicitação, escolha a babá responsável e aceite ou recuse o atendimento.</p>
@@ -3049,8 +3053,12 @@ export function BichanoApp() {
             <div className={styles.formDivider}>Relatório da visita</div>
             <label className={styles.field}><span>Resumo para o tutor</span><textarea rows={4} value={visitNote} onChange={(event) => setVisitNote(event.target.value)} placeholder="Alimentação, água, caixa de areia, comportamento e medicação" /></label>
             <div className={styles.formActions}>
-              <button className={styles.secondaryButton} disabled={actionBusy} onClick={() => void recordVisit(false)}>Salvar relatório</button>
-              <button className={styles.primaryButton} disabled={actionBusy} onClick={() => void recordVisit(true)}>Concluir visita</button>
+              {role === "staff" ? (
+                <button className={styles.primaryButton} disabled={actionBusy} onClick={() => void updateAssignedVisit()}>{actionBusy ? "Salvando..." : "Salvar visita"}</button>
+              ) : <>
+                <button className={styles.secondaryButton} disabled={actionBusy} onClick={() => void recordVisit(false)}>Salvar relatório</button>
+                <button className={styles.primaryButton} disabled={actionBusy} onClick={() => void recordVisit(true)}>Concluir visita</button>
+              </>}
             </div>
           </>}
         </Modal>
@@ -3312,7 +3320,7 @@ function StaffCard({ name, detail, active = false, locked = false, onAction }: {
   return <article className={styles.staffCard}><span className={styles.initials}>{name.split(" ").map((part) => part[0]).join("")}</span><span><strong>{name}</strong><small>{active ? `Acesso ativo • ${detail}` : `Acesso suspenso • ${detail}`}</small></span><button className={active ? styles.revoke : ""} disabled={locked} onClick={onAction}>{locked ? "Principal" : active ? "Revogar" : "Conceder"}</button></article>;
 }
 
-function ClientCard({ client, saving, onOpen, onApprove }: { client: ClientView; saving: boolean; onOpen: () => void; onApprove: () => void }) {
+function ClientCard({ client, onOpen }: { client: ClientView; onOpen: () => void }) {
   return (
     <article
       className={styles.clientCard}
@@ -3328,18 +3336,17 @@ function ClientCard({ client, saving, onOpen, onApprove }: { client: ClientView;
     >
       <span className={styles.initials}>{client.name.split(" ").map((part) => part[0]).join("").slice(0, 2)}</span>
       <span>
-        <strong>{client.name}</strong>
+        <strong>
+          {client.name}
+          <b className={styles.clientPetInline}>{client.petNames.length ? client.petNames.join(", ") : "Bichano não informado"}</b>
+        </strong>
         <small>{client.phone}</small>
         <small>{client.address}</small>
-        <small>{client.petNames.length ? client.petNames.join(", ") : "Bichano não informado"}</small>
         {client.welcomeCode && <small className={styles.welcomeCode}>Cupom de boas-vindas: <b>{client.welcomeCode}</b></small>}
         <em className={client.active ? styles.clientActive : styles.clientPending}>
           {client.active ? "Acesso ativo" : "Aguardando aprovação"}
         </em>
       </span>
-      <div className={styles.clientActions}>
-        {!client.active && <button disabled={saving} onClick={(event) => { event.stopPropagation(); onApprove(); }}>Aceitar</button>}
-      </div>
     </article>
   );
 }
@@ -3423,25 +3430,42 @@ function Calendar({
   onSelectDate?: (dateKey: string) => void;
 }) {
   const today = new Date();
-  const year = today.getFullYear();
-  const month = today.getMonth();
+  const [visibleMonthIndex, setVisibleMonthIndex] = useState(0);
+  const months = Array.from({ length: 7 }, (_, index) => new Date(today.getFullYear(), today.getMonth() + index, 1));
+  const monthDate = months[visibleMonthIndex];
+  const year = monthDate.getFullYear();
+  const month = monthDate.getMonth();
   const firstWeekday = new Date(year, month, 1).getDay();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const days = [...Array.from({ length: firstWeekday }, () => null), ...Array.from({ length: daysInMonth }, (_, index) => index + 1)];
-  const monthLabel = new Intl.DateTimeFormat("pt-BR", { month: "long", year: "numeric" }).format(today);
+  const monthLabel = new Intl.DateTimeFormat("pt-BR", { month: "long", year: "numeric" }).format(monthDate);
   const appointmentDays = new Set(
     appointments
       .filter((appointment) => appointment.rawStatus !== "cancelled" && appointment.rawStatus !== "completed")
       .flatMap((appointment) => appointmentCalendarDateKeys(appointment)),
   );
-  return <div className={styles.calendar}><div className={styles.calendarHead}><span /><strong>{monthLabel}</strong><span /></div><div className={styles.calendarGrid}>{["D", "S", "T", "Q", "Q", "S", "S"].map((day, index) => <span key={`${day}-${index}`}>{day}</span>)}{days.map((day, index) => {
-    if (day === null) return <span key={`empty-${index}`} />;
-    const dateKey = localDateKey(new Date(year, month, day));
-    const hasAppointment = appointmentDays.has(dateKey);
-    const isToday = day === today.getDate();
-    const isSelected = selectedDateKey === dateKey;
-    return <button className={`${isToday ? styles.selectedDay : ""} ${hasAppointment ? styles.appointmentDay : ""} ${isSelected ? styles.activeCalendarDay : ""}`} key={day} onClick={() => onSelectDate?.(dateKey)}>{day}{hasAppointment && <small />}</button>;
-  })}</div></div>;
+
+  return (
+    <div className={styles.calendar}>
+      <div className={styles.calendarHead}>
+        <button aria-label="Mês anterior" disabled={visibleMonthIndex === 0} type="button" onClick={() => setVisibleMonthIndex((current) => Math.max(current - 1, 0))}>‹</button>
+        <strong>{monthLabel}</strong>
+        <button aria-label="Próximo mês" disabled={visibleMonthIndex === months.length - 1} type="button" onClick={() => setVisibleMonthIndex((current) => Math.min(current + 1, months.length - 1))}>›</button>
+      </div>
+      <div className={styles.calendarGrid}>
+        {["D", "S", "T", "Q", "Q", "S", "S"].map((day, index) => <span key={`${monthLabel}-${day}-${index}`}>{day}</span>)}
+        {days.map((day, index) => {
+          if (day === null) return <span key={`empty-${year}-${month}-${index}`} />;
+          const date = new Date(year, month, day);
+          const dateKey = localDateKey(date);
+          const hasAppointment = appointmentDays.has(dateKey);
+          const isToday = localDateKey(today) === dateKey;
+          const isSelected = selectedDateKey === dateKey;
+          return <button className={`${isToday ? styles.selectedDay : ""} ${hasAppointment ? styles.appointmentDay : ""} ${isSelected ? styles.activeCalendarDay : ""}`} key={dateKey} onClick={() => onSelectDate?.(dateKey)}>{day}{hasAppointment && <small />}</button>;
+        })}
+      </div>
+    </div>
+  );
 }
 
 function Modal({ title, description, onClose, children }: { title: string; description: string; onClose: () => void; children: React.ReactNode }) {

@@ -50,10 +50,12 @@ Publique a função de convite:
 npx supabase functions deploy invite-staff
 ```
 
-Configure `ALLOWED_ORIGINS` na Edge Function com as origens do app separadas
-por vírgula, por exemplo `https://app.exemplo.com,http://localhost:3000`.
 Enquanto a verificação em duas etapas estiver pausada, mantenha o secret
 `REQUIRE_STAFF_MFA=false` na Edge Function.
+
+A função `invite-staff` valida a sessão dentro do próprio código. Por isso,
+`supabase/config.toml` mantém `verify_jwt = false`, permitindo que o preflight
+`OPTIONS` do navegador passe pelo CORS antes do `POST` autenticado.
 
 Se o Supabase CLI mostrar `Access token not provided`, autentique primeiro:
 
@@ -66,7 +68,7 @@ e configure os secrets:
 
 ```powershell
 npx supabase functions deploy invite-staff --project-ref esbwbjuksedcdtkexoiv
-npx supabase secrets set --project-ref esbwbjuksedcdtkexoiv ALLOWED_ORIGINS=http://localhost:3000 REQUIRE_STAFF_MFA=false
+npx supabase secrets set --project-ref esbwbjuksedcdtkexoiv REQUIRE_STAFF_MFA=false
 ```
 
 Nunca coloque a chave `service_role` no navegador.

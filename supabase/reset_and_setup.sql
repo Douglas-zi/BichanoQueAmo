@@ -380,6 +380,19 @@ begin
 end;
 $$;
 
+create function public.admin_approve_client_v3(target_user_id uuid)
+returns boolean language plpgsql security definer
+set search_path = public set row_security = off as $$
+begin
+  if not public.is_admin() then raise exception 'Apenas a administradora pode aprovar clientes'; end if;
+  update public.profiles
+  set role = 'client', active = true, updated_at = now()
+  where id = target_user_id and role = 'client';
+  if not found then raise exception 'Cliente nao encontrado'; end if;
+  return true;
+end;
+$$;
+
 create function public.admin_recover_client_v3(requested_email text)
 returns uuid language plpgsql security definer
 set search_path = public, auth set row_security = off as $$
@@ -394,6 +407,41 @@ begin
   insert into public.profiles (id, email, full_name, role, active)
   values (target_user.id, target_user.email, coalesce(target_user.raw_user_meta_data ->> 'full_name', ''), 'client', false)
   on conflict (id) do update set email = excluded.email, role = 'client', active = false;
+  return target_user.id;
+end;
+$$;
+
+create function public.admin_register_staff(requested_email text, requested_full_name text)
+returns uuid language plpgsql security definer
+set search_path = public, auth set row_security = off as $$
+declare
+  target_user auth.users%rowtype;
+  normalized_email text := lower(trim(requested_email));
+  normalized_name text := trim(requested_full_name);
+begin
+  if not public.is_admin() then raise exception 'Apenas a administradora pode cadastrar babas'; end if;
+  if normalized_email !~ '^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$' or length(normalized_name) < 2 then
+    raise exception 'Nome ou e-mail invalido';
+  end if;
+
+  select * into target_user from auth.users where lower(email) = normalized_email limit 1;
+  if not found then
+    raise exception 'Peça para a babá criar uma conta pelo botão Cadastrar antes de adicioná-la à equipe';
+  end if;
+
+  if exists (select 1 from public.profiles where id = target_user.id and role = 'admin') then
+    raise exception 'Esta conta ja e administradora';
+  end if;
+
+  insert into public.profiles (id, email, full_name, role, active)
+  values (target_user.id, target_user.email, normalized_name, 'staff', true)
+  on conflict (id) do update set
+    email = excluded.email,
+    full_name = excluded.full_name,
+    role = 'staff',
+    active = true,
+    updated_at = now();
+
   return target_user.id;
 end;
 $$;
@@ -657,6 +705,33 @@ begin
   values(target_appointment_id, auth.uid(), trim(visit_note));
   update public.appointments set status = case when complete_visit then 'completed' else 'in_progress' end
   where id = target_appointment_id;
+end;
+$$;
+
+create function public.staff_update_assigned_visit(
+  target_appointment_id uuid,
+  requested_status public.appointment_status,
+  visit_note text default null
+)
+returns void language plpgsql security definer
+set search_path = public set row_security = off as $$
+begin
+  if not public.staff_is_assigned_to_appointment(target_appointment_id) then
+    raise exception 'Atendimento nao atribuido';
+  end if;
+
+  if requested_status not in ('confirmed', 'in_progress', 'completed') then
+    raise exception 'Status indisponivel para baba';
+  end if;
+
+  if nullif(trim(coalesce(visit_note, '')), '') is not null then
+    insert into public.appointment_notes(appointment_id, created_by, note)
+    values(target_appointment_id, auth.uid(), trim(visit_note));
+  end if;
+
+  update public.appointments
+  set status = requested_status
+  where id = target_appointment_id and assigned_to = auth.uid();
 end;
 $$;
 

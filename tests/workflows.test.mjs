@@ -8,7 +8,8 @@ const appPath = new URL("../components/BichanoApp.tsx", import.meta.url);
 const manageAppointmentPatchPath = new URL("../supabase/patches/manage_appointment.sql", import.meta.url);
 const reviewAppointmentRequestPatchPath = new URL("../supabase/patches/review_appointment_request.sql", import.meta.url);
 const paymentStatusCastPatchPath = new URL("../supabase/patches/sync_appointment_payment_status_cast.sql", import.meta.url);
-const inviteStaffPath = new URL("../supabase/functions/invite-staff/index.ts", import.meta.url);
+const adminRegisterStaffPatchPath = new URL("../supabase/patches/admin_register_staff.sql", import.meta.url);
+const staffUpdateVisitPatchPath = new URL("../supabase/patches/staff_update_assigned_visit.sql", import.meta.url);
 
 test("Supabase has one consolidated setup and no historical migrations", async () => {
   const entries = await readdir(migrationsPath).catch(() => []);
@@ -46,7 +47,9 @@ test("consolidated setup defines every RPC used by the app", async () => {
   for (const operation of [
     "admin_pending_clients_v2",
     "admin_review_client_v2",
+    "admin_approve_client_v3",
     "admin_recover_client_v3",
+    "admin_register_staff",
     "complete_client_intake",
     "get_standard_visit_price",
     "set_standard_visit_price",
@@ -57,6 +60,7 @@ test("consolidated setup defines every RPC used by the app", async () => {
     "review_appointment_request",
     "cancel_my_appointment",
     "record_visit",
+    "staff_update_assigned_visit",
     "activate_discount_code",
     "my_welcome_code",
     "generate_overdue_payment_reminders",
@@ -81,7 +85,7 @@ test("interactive workflows are connected", async () => {
   const reviewAppointmentRequestPatch = await readFile(reviewAppointmentRequestPatchPath, "utf8");
   const paymentStatusCastPatch = await readFile(paymentStatusCastPatchPath, "utf8");
   const setupSql = await readFile(setupPath, "utf8");
-  assert.match(source, /supabase\.functions\.invoke\("invite-staff"/);
+  assert.match(source, /supabase\.rpc\("admin_register_staff"/);
   assert.match(source, /supabase\.rpc\("request_appointment"/);
   assert.match(source, /supabase\.rpc\("manage_waitlist_request"/);
   assert.match(source, /supabase\.rpc\("manage_appointment"/);
@@ -106,20 +110,38 @@ test("interactive workflows are connected", async () => {
   assert.doesNotMatch(source, /for \(const selectedPetId of bookingPetIds\)/);
   assert.doesNotMatch(source, /bookingPetIds\.flatMap\(\(selectedPetId\)/);
   assert.match(source, /supabase\.rpc\("record_visit"/);
+  assert.match(source, /supabase\.rpc\("staff_update_assigned_visit"/);
   assert.match(source, /from\("pets"\)\.update\(petPayload\)/);
   assert.match(source, /from\("pets"\)\.update\(\{ active: false \}\)/);
   assert.doesNotMatch(source, /Convite demonstrativo enviado/);
   assert.doesNotMatch(source, /defaultValue="2026-06-16"/);
 });
 
-test("staff invitations handle browser calls and surface backend errors", async () => {
+test("staff can update only assigned visits without admin privileges", async () => {
+  const source = await readFile(appPath, "utf8");
+  const setupSql = await readFile(setupPath, "utf8");
+  const patchSql = await readFile(staffUpdateVisitPatchPath, "utf8");
+  assert.match(source, /Status da visita/);
+  assert.match(source, /function updateAssignedVisit/);
+  assert.match(source, /requested_status: managedStatus/);
+  assert.match(setupSql, /create function public\.staff_update_assigned_visit/);
+  assert.match(patchSql, /public\.staff_is_assigned_to_appointment\(target_appointment_id\)/);
+  assert.match(patchSql, /requested_status not in \('confirmed', 'in_progress', 'completed'\)/);
+  assert.doesNotMatch(patchSql, /public\.is_admin\(\)/);
+});
+
+test("staff registration promotes an existing signup without Edge Functions", async () => {
   const appSource = await readFile(appPath, "utf8");
-  const functionSource = await readFile(inviteStaffPath, "utf8");
-  assert.match(appSource, /functionErrorMessage\(error/);
-  assert.match(appSource, /error\.context\.json\(\)/);
-  assert.match(appSource, /Failed to send a request to the Edge Function/i);
-  assert.match(appSource, /Publique invite-staff/);
-  assert.match(appSource, /throw new Error\(await functionErrorMessage\(error, "Não foi possível enviar o convite\."\)\)/);
-  assert.match(functionSource, /allowedOrigins\.length === 0 \|\| allowedOrigins\.includes\(origin\)/);
-  assert.match(functionSource, /\.eq\("id", inviteRecord\.id\)/);
+  const setupSql = await readFile(setupPath, "utf8");
+  const patchSql = await readFile(adminRegisterStaffPatchPath, "utf8");
+  assert.match(appSource, /Cadastrar babá/);
+  assert.match(appSource, /supabase\.rpc\("admin_register_staff"/);
+  assert.doesNotMatch(appSource, /functions\/v1\/invite-staff/);
+  assert.doesNotMatch(appSource, /setInviteOpen/);
+  assert.match(appSource, /staffFormError/);
+  assert.match(appSource, /styles\.staffRegistration/);
+  assert.match(setupSql, /create function public\.admin_register_staff/);
+  assert.match(patchSql, /create or replace function public\.admin_register_staff/);
+  assert.match(patchSql, /role = 'staff'/);
+  assert.match(patchSql, /notify pgrst, 'reload schema'/);
 });

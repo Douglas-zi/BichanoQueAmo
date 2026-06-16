@@ -166,30 +166,28 @@
 .paymentCard button, .staffCard button { padding: 9px 10px; border-radius: 11px; color: white; background: var(--orange); font-size: 9px; font-weight: 850; }
 .paymentCard button { background: var(--red); }
 .staffCard .revoke { color: var(--red); background: #fff0f2; }
+.staffRegistration { display: grid; gap: 10px; margin-top: 12px; padding: 15px; border: 1px solid var(--line); border-radius: 21px; background: #fff8e9; box-shadow: 0 8px 22px rgba(58,34,19,.05); }
+.staffRegistration strong { color: var(--brown); font-size: 13px; }
+.staffRegistration small { color: var(--muted); font-size: 10px; line-height: 1.45; }
+.staffRegistration .field { margin-bottom: 0; }
 .clientCard > span:nth-child(2) { min-width: 0; flex: 1; }
 .clientCard { gap: 9px; padding: 10px 12px; border-radius: 17px; cursor: pointer; transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease; }
 .clientCard .initials { flex-basis: 42px; min-height: 42px; border-radius: 13px; font-size: 10px; }
 .clientCard:hover, .clientCard:focus-visible { border-color: #ef9a8f; box-shadow: 0 12px 26px rgba(58,34,19,.1); transform: translateY(-1px); outline: none; }
 .clientCard strong, .clientCard small { display: block; }
 .clientCard strong { color: var(--brown); font-size: 12px; }
+.clientPetInline { display: inline-block; margin-left: 7px; color: var(--red); font-size: 10px; font-weight: 850; }
 .clientCard small { margin-top: 2px; color: var(--muted); font-size: 9px; line-height: 1.25; overflow-wrap: anywhere; }
 .clientCard .welcomeCode { color: #8a4617; font-weight: 700; }
 .clientCard em { display: inline-block; margin-top: 5px; padding: 4px 7px; border-radius: 999px; font-size: 7px; font-style: normal; font-weight: 850; text-transform: uppercase; }
 .clientActive { color: #8a4617; background: #fff0cf; }
 .clientPending { color: #a52d3e; background: #fff0f2; }
-.clientActions { display: grid; gap: 6px; }
-.clientActions button { padding: 8px 9px; border-radius: 10px; color: white; background: var(--orange); font-size: 9px; font-weight: 850; }
-.clientActions button:disabled { opacity: .55; cursor: wait; }
 .clientListToolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 13px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 17px; background: white; }
 .clientListToolbar span { display: grid; gap: 3px; }
 .clientListToolbar strong { color: var(--brown); font-size: 12px; }
 .clientListToolbar small { color: var(--muted); font-size: 9px; }
 .clientListToolbar button { padding: 9px 11px; border-radius: 11px; color: white; background: var(--red); font-size: 9px; font-weight: 850; }
 .clientListToolbar button:disabled { opacity: .6; cursor: wait; }
-.legacyClientRecovery { margin-bottom: 13px; padding: 14px; border: 1px dashed #dfcec0; border-radius: 17px; background: rgba(255,255,255,.58); }
-.legacyClientRecovery .field { margin-bottom: 9px; }
-.legacyClientRecovery button { width: 100%; min-height: 43px; border-radius: 13px; color: white; background: var(--orange); font-size: 10px; font-weight: 850; }
-.legacyClientRecovery button:disabled { opacity: .55; cursor: wait; }
 .clientDetail { display: grid; gap: 18px; }
 .clientDetail section { display: grid; gap: 10px; }
 .clientDetail h4 { color: var(--brown); font-size: 12px; font-weight: 850; text-transform: uppercase; }
@@ -201,6 +199,8 @@
 .clientPetDetail > div { min-width: 0; }
 .clientPetDetail > div > strong { display: block; margin-bottom: 9px; color: var(--brown); font-size: 16px; }
 .clientPetPhoto { display: grid; place-items: center; width: 100%; aspect-ratio: 4 / 3; min-height: 150px; border-radius: 18px; color: var(--brown); background-color: var(--yellow); background-position: center; background-size: cover; font-size: 10px; font-weight: 850; text-transform: uppercase; }
+.approveClientDetail { width: 100%; min-height: 48px; margin-top: 18px; border-radius: 16px; color: white; background: var(--orange); font-size: 11px; font-weight: 850; }
+.approveClientDetail:disabled { opacity: .55; cursor: wait; }
 .deleteClientDetail { width: 100%; min-height: 48px; margin-top: 18px; border-radius: 16px; color: var(--red); background: #fff0f2; font-size: 11px; font-weight: 850; }
 .deleteClientDetail:disabled { opacity: .55; cursor: wait; }
 .statsGrid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 18px 0 24px; }
@@ -230,6 +230,7 @@
 .calendar { padding: 15px; border: 1px solid var(--line); border-radius: 25px; background: white; }
 .calendarHead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
 .calendarHead button { width: 36px; height: 36px; border-radius: 12px; color: var(--brown); background: var(--cream); }
+.calendarHead button:disabled { color: #c9bbb1; cursor: default; opacity: .55; }
 .calendarGrid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; text-align: center; }
 .calendarGrid span { padding-bottom: 7px; color: var(--muted); font-size: 9px; font-weight: 850; }
 .calendarGrid button { position: relative; display: grid; place-items: center; aspect-ratio: 1; border-radius: 11px; color: var(--ink); background: transparent; font-size: 11px; font-weight: 700; }

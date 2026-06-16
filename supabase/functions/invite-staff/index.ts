@@ -9,12 +9,8 @@ const baseHeaders = {
 
 function responseHeaders(request: Request) {
   const origin = request.headers.get("Origin");
-  const allowedOrigins = (Deno.env.get("ALLOWED_ORIGINS") || "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
 
-  return origin && (allowedOrigins.length === 0 || allowedOrigins.includes(origin))
+  return origin
     ? { ...baseHeaders, "Access-Control-Allow-Origin": origin }
     : baseHeaders;
 }
@@ -49,18 +45,22 @@ Deno.serve(async (request) => {
     const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
     const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
+    if (!supabaseUrl || !anonKey || !serviceRoleKey) {
+      throw new Error("Configuração da Edge Function incompleta");
+    }
+
     const userClient = createClient(supabaseUrl, anonKey, {
       global: { headers: { Authorization: authorization } },
     });
     const adminClient = createClient(supabaseUrl, serviceRoleKey);
+    const accessToken = authorization.replace(/^Bearer\s+/i, "");
 
-    const { data: userData, error: userError } = await userClient.auth.getUser();
+    const { data: userData, error: userError } = await adminClient.auth.getUser(accessToken);
     if (userError || !userData.user) {
-      throw new Error("Sessão inválida");
+      throw new Error(`Sessão inválida: ${userError?.message || "usuário não encontrado"}`);
     }
 
     if (Deno.env.get("REQUIRE_STAFF_MFA") === "true") {
-      const accessToken = authorization.replace(/^Bearer\s+/i, "");
       const { data: assurance, error: assuranceError } =
         await userClient.auth.mfa.getAuthenticatorAssuranceLevel(accessToken);
       if (assuranceError || assurance?.currentLevel !== "aal2") {
@@ -70,12 +70,15 @@ Deno.serve(async (request) => {
 
     const { data: profile, error: profileError } = await adminClient
       .from("profiles")
-      .select("role, active")
+      .select("email, role, active")
       .eq("id", userData.user.id)
       .single();
 
     if (profileError || profile?.role !== "admin" || !profile.active) {
-      throw new Error("Apenas o administrador principal pode enviar convites");
+      const currentEmail = profile?.email || userData.user.email || "e-mail não identificado";
+      const currentRole = profile?.role || "sem perfil";
+      const currentStatus = profile?.active ? "ativo" : "inativo";
+      throw new Error(`Sessão atual: ${currentEmail} (${currentRole}, ${currentStatus}). Entre com uma conta administradora ativa para enviar convites`);
     }
 
     const { email, fullName } = await request.json();
@@ -134,8 +137,8 @@ Deno.serve(async (request) => {
     console.error("invite-staff failed", error);
     const message = error instanceof Error ? error.message : "";
     const isAuthenticationError = message.includes("Sessão");
-    const isAuthorizationError =
-      message.includes("administrador") || message.includes("duas etapas");
+    const isMfaError = message.includes("duas etapas");
+    const isAuthorizationError = message.includes("conta administradora ativa");
     const normalizedMessage = message.toLowerCase();
     const isExistingUser =
       normalizedMessage.includes("already") ||
@@ -149,16 +152,26 @@ Deno.serve(async (request) => {
       request,
       {
         error: isAuthenticationError
-          ? "Sessão inválida"
-          : isAuthorizationError
-            ? "Acesso não autorizado"
+          ? message
+          : isMfaError
+            ? "A verificação em duas etapas está obrigatória para enviar convites."
+            : isAuthorizationError
+              ? message
             : isExistingUser
               ? "Este e-mail já possui cadastro ou convite."
               : isRateLimited
                 ? "Muitos convites foram enviados. Aguarde alguns minutos e tente novamente."
-                : "Não foi possível enviar o convite",
+                : message || "Não foi possível enviar o convite",
       },
-      isAuthenticationError ? 401 : isAuthorizationError ? 403 : isRateLimited ? 429 : 400,
+      isAuthenticationError
+        ? 401
+        : isMfaError || isAuthorizationError
+          ? 403
+          : isRateLimited
+            ? 429
+            : message.includes("Configuração")
+              ? 500
+              : 400,
     );
   }
 });
